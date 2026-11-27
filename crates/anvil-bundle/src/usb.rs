@@ -12,7 +12,8 @@ use anvil_env::MANAGED_TOOLS;
 use serde::Serialize;
 
 use crate::error::{BundleError, Result};
-use crate::recipe::{BundleRecipe, RecipeBook, UpstreamArtifact, UpstreamLayout};
+use crate::recipe::{BundleRecipe, RecipeBook, UpstreamArtifact};
+use crate::repack::stream_repack_to_tar_zst;
 
 fn io_err(path: &Path) -> impl FnOnce(std::io::Error) -> BundleError + '_ {
     move |source| BundleError::Io {
@@ -411,26 +412,73 @@ pub fn sync_usb(book: &RecipeBook, opts: &SyncOptions) -> Result<SyncReport> {
 }
 
 fn sync_one_bundle(recipe: &BundleRecipe, opts: &SyncOptions) -> Result<PackReport> {
-    let stage = tempfile::Builder::new()
-        .prefix(&format!("anvil-sync-{}-", recipe.id))
-        .tempdir()
-        .map_err(io_err(Path::new("tempdir")))?;
-
+    let mut inputs = Vec::with_capacity(recipe.artifacts.len());
     for artifact in &recipe.artifacts {
         let cached = opts.cache_dir.join(&artifact.filename);
+        eprintln!("==> [{}/{}] fetching {}", recipe.platform, recipe.id, artifact.filename);
         download_artifact(artifact, &cached)?;
-        extract_upstream(&cached, artifact.layout, stage.path())?;
+        inputs.push((cached, artifact.layout));
     }
 
-    pack_bundle(&PackRequest {
-        usb_dir: &opts.usb_dir,
+    let rel_archive = format!("bundles/{}/{}", recipe.platform.as_str(), recipe.archive_name);
+    let out_path = opts
+        .usb_dir
+        .join("bundles")
+        .join(recipe.platform.as_str())
+        .join(&recipe.archive_name);
+
+    eprintln!(
+        "==> [{}/{}] stream-repacking into {} (zstd level {})...",
+        recipe.platform,
+        recipe.id,
+        out_path.display(),
+        opts.level
+    );
+    let repacked = stream_repack_to_tar_zst(&inputs, recipe.platform, &out_path, opts.level)?;
+
+    let manifest_path = opts.usb_dir.join(MANIFEST_FILE);
+    let mut manifest = if manifest_path.is_file() {
+        Manifest::load(&manifest_path)?
+    } else {
+        Manifest {
+            schema_version: SCHEMA_VERSION,
+            anvil_version: ANVIL_VERSION.to_string(),
+            bundles: Vec::new(),
+        }
+    };
+    manifest.anvil_version = ANVIL_VERSION.to_string();
+
+    let spec = BundleSpec {
+        id: recipe.id.clone(),
         platform: recipe.platform,
-        id: &recipe.id,
-        version: &recipe.version,
-        source_dir: stage.path(),
-        target_subdir: Some(&recipe.target_subdir),
-        archive_name: Some(&recipe.archive_name),
-        level: opts.level,
+        archive: rel_archive,
+        sha256: repacked.sha256.clone(),
+        size_bytes: repacked.size_bytes,
+        target_subdir: recipe.target_subdir.clone(),
+        version: recipe.version.clone(),
+        tools: repacked.tools.clone(),
+    };
+    if let Some(slot) = manifest
+        .bundles
+        .iter_mut()
+        .find(|b| b.id == spec.id && b.platform == spec.platform)
+    {
+        *slot = spec;
+    } else {
+        manifest.bundles.push(spec);
+    }
+    manifest.validate()?;
+    save_manifest(&manifest_path, &manifest)?;
+
+    Ok(PackReport {
+        id: recipe.id.clone(),
+        platform: recipe.platform,
+        version: recipe.version.clone(),
+        archive: out_path,
+        sha256: repacked.sha256,
+        size_bytes: repacked.size_bytes,
+        tools: repacked.tools,
+        manifest_path,
     })
 }
 
@@ -468,115 +516,6 @@ fn download_artifact(artifact: &UpstreamArtifact, dest: &Path) -> Result<()> {
         }
     }
     fs::rename(&tmp, dest).map_err(io_err(dest))?;
-    Ok(())
-}
-
-fn extract_upstream(archive: &Path, layout: UpstreamLayout, stage_root: &Path) -> Result<()> {
-    let unpack = tempfile::Builder::new()
-        .prefix("anvil-unpack-")
-        .tempdir()
-        .map_err(io_err(Path::new("tempdir")))?;
-
-    let status = Command::new("tar")
-        .arg("-xf")
-        .arg(archive)
-        .arg("-C")
-        .arg(unpack.path())
-        .status()
-        .map_err(|_| BundleError::MissingHostTool("tar".into()))?;
-    if !status.success() {
-        return Err(BundleError::ExternalCommand {
-            command: format!("tar -xf {}", archive.display()),
-            detail: format!("exit status {status}"),
-        });
-    }
-
-    match layout {
-        UpstreamLayout::StripTopDir => {
-            let src = single_child_dir(unpack.path()).unwrap_or_else(|| unpack.path().to_path_buf());
-            merge_tree(&src, stage_root)?;
-        }
-        UpstreamLayout::IntoBin => {
-            let bin = stage_root.join("bin");
-            fs::create_dir_all(&bin).map_err(io_err(&bin))?;
-            merge_tree(unpack.path(), &bin)?;
-        }
-        UpstreamLayout::RustComponent => {
-            let pkg_root = single_child_dir(unpack.path()).unwrap_or_else(|| unpack.path().to_path_buf());
-            // Official Rust tarballs contain a `components` file listing subdir names (e.g. `rustc`, `rust-std-...`).
-            let comps_file = pkg_root.join("components");
-            if comps_file.is_file() {
-                let text = fs::read_to_string(&comps_file).map_err(io_err(&comps_file))?;
-                for comp in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
-                    let comp_dir = pkg_root.join(comp);
-                    if comp_dir.is_dir() {
-                        merge_tree_excluding_meta(&comp_dir, stage_root)?;
-                    }
-                }
-            } else {
-                merge_tree_excluding_meta(&pkg_root, stage_root)?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn single_child_dir(dir: &Path) -> Option<PathBuf> {
-    let mut entries = fs::read_dir(dir).ok()?.filter_map(std::result::Result::ok);
-    let first = entries.next()?;
-    if entries.next().is_some() {
-        return None;
-    }
-    first.file_type().ok()?.is_dir().then(|| first.path())
-}
-
-fn merge_tree(src: &Path, dst: &Path) -> Result<()> {
-    fs::create_dir_all(dst).map_err(io_err(dst))?;
-    for entry in fs::read_dir(src).map_err(io_err(src))? {
-        let entry = entry.map_err(io_err(src))?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        let ft = entry.file_type().map_err(io_err(&from))?;
-        if ft.is_dir() {
-            merge_tree(&from, &to)?;
-        } else if ft.is_symlink() {
-            #[cfg(unix)]
-            {
-                let target = fs::read_link(&from).map_err(io_err(&from))?;
-                let _ = fs::remove_file(&to);
-                std::os::unix::fs::symlink(&target, &to).map_err(io_err(&to))?;
-            }
-            #[cfg(not(unix))]
-            {
-                fs::copy(&from, &to).map_err(io_err(&to))?;
-            }
-        } else {
-            fs::copy(&from, &to).map_err(io_err(&to))?;
-        }
-    }
-    Ok(())
-}
-
-fn merge_tree_excluding_meta(src: &Path, dst: &Path) -> Result<()> {
-    fs::create_dir_all(dst).map_err(io_err(dst))?;
-    for entry in fs::read_dir(src).map_err(io_err(src))? {
-        let entry = entry.map_err(io_err(src))?;
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if matches!(
-            name_str.as_ref(),
-            "manifest.in" | "install.sh" | "components" | "rust-installer-version"
-        ) {
-            continue;
-        }
-        let from = entry.path();
-        let to = dst.join(&name);
-        if entry.file_type().map_err(io_err(&from))?.is_dir() {
-            merge_tree(&from, &to)?;
-        } else {
-            fs::copy(&from, &to).map_err(io_err(&to))?;
-        }
-    }
     Ok(())
 }
 

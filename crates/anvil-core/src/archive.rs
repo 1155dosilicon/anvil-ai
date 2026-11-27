@@ -491,11 +491,31 @@ fn append_tree<W: io::Write>(builder: &mut tar::Builder<W>, root: &Path, rel: &P
         if file_type.is_dir() {
             builder.append_dir(&name, &path).at(&path)?;
             append_tree(builder, root, &name)?;
+        } else if cfg!(windows) && file_type.is_file() && looks_like_unix_executable(&path) {
+            let mut file = File::open(&path).at(&path)?;
+            let meta = file.metadata().at(&path)?;
+            let mut header = tar::Header::new_gnu();
+            header.set_metadata_in_mode(&meta, tar::HeaderMode::Deterministic);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder.append_data(&mut header, &name, &mut file).at(&path)?;
         } else {
             builder.append_path_with_name(&path, &name).at(&path)?;
         }
     }
     Ok(())
+}
+
+/// Detect ELF binaries or `#!` scripts when packing Linux toolchains from a Windows host.
+fn looks_like_unix_executable(path: &Path) -> bool {
+    let Ok(mut f) = File::open(path) else {
+        return false;
+    };
+    let mut magic = [0u8; 4];
+    let Ok(n) = f.read(&mut magic) else {
+        return false;
+    };
+    (n >= 4 && &magic == b"\x7fELF") || (n >= 2 && &magic[..2] == b"#!")
 }
 
 #[cfg(test)]

@@ -2,6 +2,7 @@
 
 pub mod error;
 pub mod recipe;
+pub mod repack;
 pub mod usb;
 
 pub use error::{BundleError, Result};

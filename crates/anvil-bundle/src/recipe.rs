@@ -74,11 +74,11 @@ impl RecipeBook {
         let ninja_ver = "1.12.1";
 
         let rust_dist = "https://static.rust-lang.org/dist";
-        let rust_win_triple = "x86_64-pc-windows-gnullvm";
+        let rust_win_triple = "x86_64-pc-windows-gnu";
         let rust_linux_triple = "x86_64-unknown-linux-gnu";
 
-        let rust_artifacts = |triple: &str| -> Vec<UpstreamArtifact> {
-            let comps = [
+        let rust_artifacts = |triple: &str, include_win_extras: bool| -> Vec<UpstreamArtifact> {
+            let mut comps = vec![
                 format!("rustc-{rust_ver}-{triple}.tar.xz"),
                 format!("cargo-{rust_ver}-{triple}.tar.xz"),
                 format!("rust-std-{rust_ver}-{triple}.tar.xz"),
@@ -87,6 +87,10 @@ impl RecipeBook {
                 format!("rust-analyzer-{rust_ver}-{triple}.tar.xz"),
                 format!("rust-src-{rust_ver}.tar.xz"),
             ];
+            if include_win_extras {
+                comps.push(format!("rust-mingw-{rust_ver}-{triple}.tar.xz"));
+                comps.push(format!("rust-std-{rust_ver}-x86_64-pc-windows-gnullvm.tar.xz"));
+            }
             comps
                 .into_iter()
                 .map(|filename| UpstreamArtifact {
@@ -123,7 +127,7 @@ impl RecipeBook {
                     version: rust_ver.into(),
                     target_subdir: "toolchains/rust".into(),
                     archive_name: "rust.tar.zst".into(),
-                    artifacts: rust_artifacts(rust_win_triple),
+                    artifacts: rust_artifacts(rust_win_triple, true),
                 },
                 BundleRecipe {
                     id: "build-tools".into(),
@@ -172,7 +176,7 @@ impl RecipeBook {
                     version: rust_ver.into(),
                     target_subdir: "toolchains/rust".into(),
                     archive_name: "rust.tar.zst".into(),
-                    artifacts: rust_artifacts(rust_linux_triple),
+                    artifacts: rust_artifacts(rust_linux_triple, false),
                 },
                 BundleRecipe {
                     id: "build-tools".into(),
