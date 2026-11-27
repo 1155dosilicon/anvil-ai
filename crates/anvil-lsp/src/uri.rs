@@ -6,7 +6,10 @@ use crate::error::{LspError, Result};
 
 /// Convert an absolute (or relative, made absolute) path into a `file://` URI.
 pub fn path_to_uri(path: &Path) -> Result<String> {
-    let abs = if path.is_absolute() {
+    let raw_in = path.to_string_lossy();
+    let looks_like_win_abs = raw_in.starts_with(r"\\?\")
+        || (raw_in.len() >= 2 && raw_in.as_bytes()[0].is_ascii_alphabetic() && raw_in.as_bytes()[1] == b':');
+    let abs = if path.is_absolute() || looks_like_win_abs {
         path.to_path_buf()
     } else {
         std::path::absolute(path).map_err(|e| LspError::InvalidPath(format!("{}: {e}", path.display())))?
