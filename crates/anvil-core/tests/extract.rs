@@ -364,3 +364,52 @@ fn keeps_internal_symlinks_and_blocks_chained_escape() {
     );
     assert!(matches!(err, CoreError::UnsafeEntry { .. }), "{err}");
 }
+
+/// `d/s -> ..` resolves to the root; `d/t -> s/..` looks like `d` lexically
+/// but is resolved through the symlink `s`, i.e. *outside* the bundle.
+#[test]
+fn rejects_escape_through_sibling_symlink() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (err, dest) = extract_hostile(
+        tmp.path(),
+        &[Raw::Symlink(b"d/s", b".."), Raw::Symlink(b"d/t", b"s/..")],
+    );
+    assert!(matches!(err, CoreError::UnsafeEntry { .. }), "{err}");
+    assert!(!dest.exists());
+}
+
+/// A link to another link listed *before* it in the archive must still be
+/// created correctly (on Windows the target has to exist first).
+#[test]
+fn symlink_chains_in_any_archive_order() {
+    let tmp = tempfile::tempdir().unwrap();
+    let archive = tmp.path().join("chain.tar.zst");
+    let sha = hostile_tar_zst(
+        &archive,
+        &[
+            Raw::Symlink(b"bin/clang++", b"clang"),
+            Raw::Symlink(b"bin/clang", b"clang-20"),
+            Raw::File(b"bin/clang-20", b"#!clang"),
+        ],
+    );
+    let dest = tmp.path().join("home/toolchains/llvm");
+    let report = extract_bundle_streaming(
+        &ExtractRequest {
+            id: "llvm",
+            archive: &archive,
+            expected_sha256: &sha,
+            expected_size: None,
+            dest: &dest,
+        },
+        &mut SilentProgress,
+    )
+    .unwrap();
+    assert_eq!(report.links, 2);
+    assert_eq!(fs::read_to_string(dest.join("bin/clang++")).unwrap(), "#!clang");
+    assert_eq!(fs::read_to_string(dest.join("bin/clang")).unwrap(), "#!clang");
+    assert!(
+        !report.warnings.iter().any(|w| w.contains("dangling")),
+        "{:?}",
+        report.warnings
+    );
+}

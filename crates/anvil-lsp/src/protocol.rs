@@ -76,4 +76,14 @@ mod tests {
         assert_eq!(read_message(&mut cursor).unwrap(), Some(m2));
         assert_eq!(read_message(&mut cursor).unwrap(), None);
     }
+
+    #[test]
+    fn invalid_json_body_keeps_framing_in_sync() {
+        let mut buf = b"Content-Length: 5\r\n\r\n{oops".to_vec();
+        let good = json!({"jsonrpc": "2.0", "method": "x"});
+        write_message(&mut buf, &good).unwrap();
+        let mut cursor = Cursor::new(buf);
+        assert!(matches!(read_message(&mut cursor), Err(LspError::Json(_))));
+        assert_eq!(read_message(&mut cursor).unwrap(), Some(good));
+    }
 }

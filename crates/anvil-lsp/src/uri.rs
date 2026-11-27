@@ -7,7 +7,7 @@ use crate::error::{LspError, Result};
 /// Convert an absolute (or relative, made absolute) path into a `file://` URI.
 pub fn path_to_uri(path: &Path) -> Result<String> {
     let raw_in = path.to_string_lossy();
-    let looks_like_win_abs = raw_in.starts_with(r"\\?\")
+    let looks_like_win_abs = raw_in.starts_with(r"\\")
         || (raw_in.len() >= 2 && raw_in.as_bytes()[0].is_ascii_alphabetic() && raw_in.as_bytes()[1] == b':');
     let abs = if path.is_absolute() || looks_like_win_abs {
         path.to_path_buf()
@@ -22,6 +22,15 @@ pub fn path_to_uri(path: &Path) -> Result<String> {
         .map(|rest| format!(r"\\{rest}"))
         .or_else(|| raw.strip_prefix(r"\\?\").map(str::to_string))
         .unwrap_or_else(|| raw.into_owned());
+
+    // UNC path (`\\server\share\x` -> `file://server/share/x`).
+    if let Some(unc) = stripped.strip_prefix(r"\\") {
+        let unc = unc.replace('\\', "/");
+        let (host, rest) = unc.split_once('/').unwrap_or((&unc, ""));
+        if !host.is_empty() {
+            return Ok(format!("file://{host}/{}", percent_encode_path(rest)));
+        }
+    }
 
     // Windows drive letter path (e.g. `C:\foo\bar` -> `file:///C:/foo/bar`).
     let bytes = stripped.as_bytes();
@@ -53,7 +62,13 @@ pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
     } else if rest.starts_with('/') {
         rest.to_string()
     } else {
-        return None;
+        // `file://server/share/x` names a UNC path.
+        let (host, path) = rest.split_once('/')?;
+        if host.is_empty() || !cfg!(windows) {
+            return None;
+        }
+        let path = percent_decode(path)?;
+        return Some(PathBuf::from(format!(r"\\{host}\{}", path.replace('/', "\\"))));
     };
 
     let decoded = percent_decode(&path_part)?;
@@ -136,6 +151,19 @@ mod tests {
             assert_eq!(back, PathBuf::from(r"C:\Users\Eli\my project\main.rs"));
         } else {
             assert_eq!(back, PathBuf::from("C:/Users/Eli/my project/main.rs"));
+        }
+    }
+
+    #[test]
+    fn unc_paths_use_the_uri_authority() {
+        let uri = path_to_uri(Path::new(r"\\server\share\my dir\a.c")).unwrap();
+        assert_eq!(uri, "file://server/share/my%20dir/a.c");
+        let extended = path_to_uri(Path::new(r"\\?\UNC\server\share\a.c")).unwrap();
+        assert_eq!(extended, "file://server/share/a.c");
+        if cfg!(windows) {
+            assert_eq!(uri_to_path(&uri).unwrap(), PathBuf::from(r"\\server\share\my dir\a.c"));
+        } else {
+            assert_eq!(uri_to_path(&uri), None);
         }
     }
 

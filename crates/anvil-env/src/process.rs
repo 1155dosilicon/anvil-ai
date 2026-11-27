@@ -2,6 +2,7 @@
 
 use std::io::{self, Read};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -112,6 +113,41 @@ fn own_process_group(cmd: &mut Command) {
 #[cfg(not(unix))]
 fn own_process_group(_cmd: &mut Command) {}
 
+/// How long the output readers may keep running once the child has exited
+/// (or been killed). A detached grandchild that inherited the pipes would
+/// otherwise keep them open – and block the caller – indefinitely.
+const READER_GRACE: Duration = Duration::from_secs(5);
+
+type SharedBuf = Arc<Mutex<Vec<u8>>>;
+
+/// Drain `pipe` on a background thread into a shared buffer; `done` fires at EOF.
+fn pump(pipe: Option<Box<dyn Read + Send>>, done: mpsc::Sender<()>) -> SharedBuf {
+    let buf: SharedBuf = Arc::default();
+    let sink = Arc::clone(&buf);
+    thread::spawn(move || {
+        if let Some(mut p) = pipe {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match p.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => sink
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .extend_from_slice(&chunk[..n]),
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+        }
+        let _ = done.send(());
+    });
+    buf
+}
+
+fn snapshot(buf: &SharedBuf) -> String {
+    String::from_utf8_lossy(&buf.lock().unwrap_or_else(|e| e.into_inner())).into_owned()
+}
+
 /// Spawn `cmd` with stdin closed and stdout/stderr captured; kill its whole
 /// process tree after `timeout` (see [`kill_tree`]).
 pub fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> io::Result<Captured> {
@@ -120,17 +156,15 @@ pub fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> io::Result<Capt
     own_process_group(cmd);
     let mut child = cmd.spawn()?;
 
-    let pump = |pipe: Option<Box<dyn Read + Send>>| {
-        thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(mut p) = pipe {
-                let _ = p.read_to_end(&mut buf);
-            }
-            String::from_utf8_lossy(&buf).into_owned()
-        })
-    };
-    let out = pump(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
-    let err = pump(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let (done_tx, done_rx) = mpsc::channel();
+    let out = pump(
+        child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>),
+        done_tx.clone(),
+    );
+    let err = pump(
+        child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>),
+        done_tx,
+    );
 
     let deadline = started + timeout;
     let status = loop {
@@ -145,10 +179,19 @@ pub fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> io::Result<Capt
         thread::sleep(Duration::from_millis(10));
     };
 
+    // Both readers normally hit EOF right away; never wait on them forever.
+    let readers_deadline = Instant::now() + READER_GRACE;
+    for _ in 0..2 {
+        let left = readers_deadline.saturating_duration_since(Instant::now());
+        if done_rx.recv_timeout(left).is_err() {
+            break;
+        }
+    }
+
     Ok(Captured {
         status,
-        stdout: out.join().unwrap_or_default(),
-        stderr: err.join().unwrap_or_default(),
+        stdout: snapshot(&out),
+        stderr: snapshot(&err),
         elapsed: started.elapsed(),
     })
 }
@@ -191,6 +234,29 @@ mod tests {
         assert!(
             out.elapsed < Duration::from_secs(15),
             "process tree survived the timeout: {:?}",
+            out.elapsed
+        );
+    }
+
+    /// The child exits at once but leaves a background grandchild holding the
+    /// output pipes: the call must return shortly, with the output so far.
+    #[test]
+    fn lingering_grandchild_does_not_block_after_exit() {
+        let mut cmd = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "echo started & start /B ping -n 30 127.0.0.1 >NUL"]);
+            c
+        } else {
+            let mut c = Command::new("/bin/sh");
+            c.args(["-c", "echo started; sleep 30 & exit 0"]);
+            c
+        };
+        let out = run_with_timeout(&mut cmd, Duration::from_secs(60)).unwrap();
+        assert!(out.success(), "{}", out.describe_failure());
+        assert!(out.stdout.contains("started"), "{:?}", out.stdout);
+        assert!(
+            out.elapsed < Duration::from_secs(15),
+            "blocked on inherited pipes: {:?}",
             out.elapsed
         );
     }

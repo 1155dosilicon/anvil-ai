@@ -262,9 +262,17 @@ fn unpack_verified(req: &ExtractRequest<'_>, tmp: &Path, progress: &mut dyn Prog
     report.sha256 = actual;
     report.archive_bytes = bytes;
 
+    // On Windows a symlink must know whether its target is a directory, and the
+    // copy fallback needs the target to exist: links pointing at other links
+    // are retried once their target has been created (archive order is arbitrary).
+    let mut pending: Vec<(PathBuf, PathBuf)> = Vec::new();
     for link in deferred {
         match link {
             DeferredLink::Symlink { rel, target } => {
+                if cfg!(windows) && !symlink_target_exists(tmp, &rel, &target) {
+                    pending.push((rel, target));
+                    continue;
+                }
                 ensure_no_symlink_ancestors(tmp, &rel).map_err(|r| unsafe_entry(&rel, r))?;
                 create_symlink(tmp, &rel, &target, &mut report.warnings)?;
             }
@@ -284,8 +292,29 @@ fn unpack_verified(req: &ExtractRequest<'_>, tmp: &Path, progress: &mut dyn Prog
         }
         report.links += 1;
     }
+    while !pending.is_empty() {
+        let (ready, waiting): (Vec<_>, Vec<_>) = pending
+            .into_iter()
+            .partition(|(rel, target)| symlink_target_exists(tmp, rel, target));
+        // No progress: the rest is dangling (or cyclic); create_symlink reports it.
+        let (batch, rest) = if ready.is_empty() {
+            (waiting, Vec::new())
+        } else {
+            (ready, waiting)
+        };
+        for (rel, target) in batch {
+            ensure_no_symlink_ancestors(tmp, &rel).map_err(|r| unsafe_entry(&rel, r))?;
+            create_symlink(tmp, &rel, &target, &mut report.warnings)?;
+            report.links += 1;
+        }
+        pending = rest;
+    }
 
     Ok(report)
+}
+
+fn symlink_target_exists(root: &Path, rel: &Path, target: &Path) -> bool {
+    root.join(rel).parent().unwrap_or(root).join(target).exists()
 }
 
 /// Normalise a tar entry path into a safe relative path.
@@ -311,12 +340,23 @@ pub fn sanitize_entry_path(raw: &Path) -> Result<Option<PathBuf>, &'static str> 
 
 /// A symlink at `rel` pointing to `target` must be relative and resolve
 /// (lexically) inside the bundle root.
+///
+/// `..` is only accepted as a leading component: after a normal component it
+/// would be resolved *through* that component, which may itself be a symlink
+/// (`d/s -> ..` + `d/t -> s/..` escapes although it looks fine lexically).
 pub fn check_symlink_target(rel: &Path, target: &Path) -> Result<(), &'static str> {
     let mut depth: usize = rel.parent().map(|p| p.components().count()).unwrap_or(0);
+    let mut descended = false;
     for component in target.components() {
         match component {
-            Component::Normal(_) => depth += 1,
+            Component::Normal(_) => {
+                depth += 1;
+                descended = true;
+            }
             Component::CurDir => {}
+            Component::ParentDir if descended => {
+                return Err("'..' after a normal component is not allowed in symlink targets");
+            }
             Component::ParentDir => {
                 depth = depth
                     .checked_sub(1)
@@ -547,5 +587,9 @@ mod tests {
         assert!(check_symlink_target(rel, Path::new("../../outside")).is_err());
         assert!(check_symlink_target(Path::new("top"), Path::new("..")).is_err());
         assert!(check_symlink_target(rel, Path::new("/usr/bin/clang")).is_err());
+        assert!(check_symlink_target(rel, Path::new("./clang")).is_ok());
+        // `s/..` is resolved through `s`, which may itself be a symlink.
+        assert!(check_symlink_target(Path::new("d/t"), Path::new("s/..")).is_err());
+        assert!(check_symlink_target(rel, Path::new("../lib/../bin/clang")).is_err());
     }
 }

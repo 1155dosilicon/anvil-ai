@@ -517,7 +517,13 @@ impl Drop for LspClient {
 
 fn reader_loop<R: Read>(stdout: R, shared: Arc<SharedState>, stdin: Arc<Mutex<ChildStdin>>) {
     let mut reader = BufReader::new(stdout);
-    while let Ok(Some(msg)) = read_message(&mut reader) {
+    loop {
+        let msg = match read_message(&mut reader) {
+            Ok(Some(msg)) => msg,
+            // The body was consumed, so framing is intact: drop the bad message only.
+            Err(LspError::Json(_)) => continue,
+            Ok(None) | Err(_) => break,
+        };
         let has_id = msg.get("id").is_some();
         let method = msg.get("method").and_then(Value::as_str);
 
