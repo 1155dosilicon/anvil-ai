@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/anvil-core",
+    "crates/anvil-env",
+    "crates/anvil-agents",
+    "crates/anvil-lsp",
+    "crates/anvil-mcp",
+    "crates/anvil-bundle",
+    "crates/anvil-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+anvil-core = { path = "crates/anvil-core" }
+anvil-env = { path = "crates/anvil-env" }
+anvil-agents = { path = "crates/anvil-agents" }
+anvil-lsp = { path = "crates/anvil-lsp" }
+anvil-mcp = { path = "crates/anvil-mcp" }
+anvil-bundle = { path = "crates/anvil-bundle" }
+
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"
+humantime = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+tar = { version = "0.4", default-features = false }
+tempfile = "3"
+thiserror = "2"
+toml_edit = "0.25"
+zstd = "0.13"
+winreg = "0.52"
+windows-sys = "0.59"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

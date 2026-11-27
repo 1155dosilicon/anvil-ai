@@ -1,0 +1,31 @@
+[package]
+name = "anvil-cli"
+description = "Anvil: portable offline toolchain installer for AI agents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "anvil"
+path = "src/main.rs"
+
+[dependencies]
+anvil-agents.workspace = true
+anvil-bundle.workspace = true
+anvil-core.workspace = true
+anvil-env.workspace = true
+anvil-mcp.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+humantime.workspace = true
+toml_edit.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

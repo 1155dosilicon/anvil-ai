@@ -1,0 +1,21 @@
+[package]
+name = "anvil-lsp"
+description = "LSP client bridge for rust-analyzer and clangd used by Anvil MCP"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+anvil-core.workspace = true
+anvil-env.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
