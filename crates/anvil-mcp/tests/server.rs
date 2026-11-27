@@ -266,11 +266,7 @@ fn cc_build_single_file_outputs_next_to_source_and_deduplicates_default_flags() 
     std::fs::write(&src_file, "int main(void) { return 0; }\n").unwrap();
     let expected_exe = src_dir.join(format!("main{}", std::env::consts::EXE_SUFFIX));
 
-    let registry = ToolRegistry::new(
-        layout,
-        server_cwd.clone(),
-        EnvMode::Sandbox(tmp.path().join("sandbox")),
-    );
+    let registry = ToolRegistry::new(layout, server_cwd.clone(), EnvMode::Sandbox(tmp.path().join("sandbox")));
 
     // 1. Passing extra_args=["-Wall", "-Wextra", "-O2"] without `output` or `workspace`:
     //    - Bug B: output goes next to main.c, NOT in server_cwd.
