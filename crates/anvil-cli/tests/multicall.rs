@@ -4,7 +4,6 @@
 
 mod common;
 
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -124,7 +123,7 @@ fn missing_real_tool_fails_cleanly() {
     #[cfg(unix)]
     std::os::unix::fs::symlink("anvil", &ninja).unwrap();
     #[cfg(windows)]
-    fs::copy(layout.anvil_exe(), &ninja).unwrap();
+    std::fs::copy(layout.anvil_exe(), &ninja).unwrap();
 
     let out = run(&mut shim(&layout, "ninja"));
     assert_eq!(out.status.code(), Some(127));
