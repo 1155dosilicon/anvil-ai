@@ -119,30 +119,38 @@ fn install_configures_agents_and_uninstall_cleans_up_surgically() {
     let exe = layout.anvil_exe();
     assert!(exe.is_absolute() && exe.is_file());
     let exe = exe.display().to_string();
+    let home_str = home.display().to_string();
 
     let sf = read_json(&agents.sf_config);
     assert_eq!(sf["apiKey"], "sk-123");
     assert_eq!(sf["baseURL"], "https://x.invalid");
     assert_eq!(sf["hooks"], json!({"a": 1}));
     assert_eq!(sf["mcpServers"]["fs"]["command"], "fs");
-    assert_eq!(sf["mcpServers"]["anvil"], json!({"command": exe, "args": ["mcp"]}));
+    assert_eq!(
+        sf["mcpServers"]["anvil"],
+        json!({"command": exe, "args": ["mcp"], "env": {"ANVIL_HOME": home_str}})
+    );
     let cli = read_json(&agents.claude_cli);
     assert_eq!(cli["userID"], "u1");
     assert_eq!(
         cli["mcpServers"]["anvil"],
-        json!({"type": "stdio", "command": exe, "args": ["mcp"]})
+        json!({"type": "stdio", "command": exe, "args": ["mcp"], "env": {"ANVIL_HOME": home_str}})
     );
     let desktop = read_json(&agents.claude_desktop);
     assert_eq!(desktop["theme"], "dark");
     assert_eq!(desktop["mcpServers"]["anvil"]["command"], exe.as_str());
+    assert_eq!(desktop["mcpServers"]["anvil"]["env"]["ANVIL_HOME"], home_str.as_str());
     let codex = fs::read_to_string(&agents.codex_config).unwrap();
     assert!(codex.contains("# personal codex config (keep me)") && codex.contains("# comment"));
     let doc_toml: toml_edit::DocumentMut = codex.parse().unwrap();
     assert_eq!(doc_toml["mcp_servers"]["anvil"]["command"].as_str(), Some(exe.as_str()));
     assert_eq!(
-        read_json(&agents.antigravity_config)["mcpServers"]["anvil"]["command"],
-        exe.as_str()
+        doc_toml["mcp_servers"]["anvil"]["env"]["ANVIL_HOME"].as_str(),
+        Some(home_str.as_str())
     );
+    let ag = read_json(&agents.antigravity_config);
+    assert_eq!(ag["mcpServers"]["anvil"]["command"], exe.as_str());
+    assert_eq!(ag["mcpServers"]["anvil"]["env"]["ANVIL_HOME"], home_str.as_str());
 
     let shome = sandbox.join("home");
     assert!(shome.join(".siliconflower/skills/rust-systems.md").is_file());
@@ -258,9 +266,14 @@ fn install_configures_agents_and_uninstall_cleans_up_surgically() {
     let snippet = stdout(&out);
     let parsed: toml_edit::DocumentMut = snippet.parse().unwrap();
     assert_eq!(parsed["mcp_servers"]["anvil"]["command"].as_str(), Some(exe.as_str()));
+    assert_eq!(
+        parsed["mcp_servers"]["anvil"]["env"]["ANVIL_HOME"].as_str(),
+        Some(home_str.as_str())
+    );
     let out = run(anvil(&sandbox).args(["agents", "print-config", "--dest"]).arg(&home));
     let snippet: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(snippet["mcpServers"]["anvil"]["args"], json!(["mcp"]));
+    assert_eq!(snippet["mcpServers"]["anvil"]["env"]["ANVIL_HOME"], home_str.as_str());
 
     // --- idempotent re-install ---------------------------------------------------
     let before = fs::read_to_string(&agents.codex_config).unwrap();

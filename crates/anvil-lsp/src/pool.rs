@@ -17,6 +17,7 @@ const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 const DEFAULT_INIT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_REQ_TIMEOUT: Duration = Duration::from_secs(20);
 const DEFAULT_DIAG_WAIT: Duration = Duration::from_millis(1200);
+const DEFAULT_RUST_DIAG_WAIT: Duration = Duration::from_millis(10_000);
 
 /// Manages live `rust-analyzer` and `clangd` instances across workspaces.
 pub struct LspPool {
@@ -77,7 +78,11 @@ impl LspPool {
         let abs = resolve_file(file, self.default_workspace.as_deref())?;
         let (kind, root) = self.classify_file(&abs)?;
         let client = self.client_for(kind, &root)?;
-        client.diagnostics(&abs, wait.unwrap_or(DEFAULT_DIAG_WAIT), self.req_timeout)
+        let default_wait = match kind {
+            LanguageKind::Rust => DEFAULT_RUST_DIAG_WAIT,
+            LanguageKind::Cpp => DEFAULT_DIAG_WAIT,
+        };
+        client.diagnostics(&abs, wait.unwrap_or(default_wait), self.req_timeout)
     }
 
     pub fn hover(&self, file: &Path, line: u32, col: u32) -> Result<Option<HoverInfo>> {

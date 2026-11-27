@@ -32,10 +32,24 @@ struct OpenDoc {
     content: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncState {
+    Unchanged,
+    Opened,
+    Changed,
+}
+
 #[derive(Default)]
 struct DiagStore {
     by_uri: HashMap<String, (u64, Vec<DiagnosticItem>)>,
     seq: u64,
+    /// Number of `rust-analyzer/flycheck/*` progress runs currently in flight.
+    flycheck_active: usize,
+    /// Incremented each time a `rust-analyzer/flycheck/*` progress run finishes.
+    flycheck_completed: u64,
+    /// `seq` at the time the latest flycheck began, used to detect whether a
+    /// `publishDiagnostics` for that run has already arrived or is still flushing.
+    flycheck_begin_seq: u64,
 }
 
 struct SharedState {
@@ -53,7 +67,7 @@ pub struct LspClient {
     next_id: AtomicI64,
     shared: Arc<SharedState>,
     open_docs: Mutex<HashMap<String, OpenDoc>>,
-    supports_pull_diagnostics: bool,
+    uses_flycheck: bool,
     last_used: Mutex<Instant>,
     _reader: Option<JoinHandle<()>>,
     _stderr: Option<JoinHandle<()>>,
@@ -117,7 +131,7 @@ impl LspClient {
             next_id: AtomicI64::new(1),
             shared,
             open_docs: Mutex::new(HashMap::new()),
-            supports_pull_diagnostics: false,
+            uses_flycheck: false,
             last_used: Mutex::new(Instant::now()),
             _reader: Some(reader),
             _stderr: stderr_handle,
@@ -135,13 +149,16 @@ impl LspClient {
                     .unwrap_or_else(|| "workspace".into()),
             }],
             "capabilities": {
+                "window": {
+                    "workDoneProgress": true
+                },
                 "textDocument": {
                     "hover": { "contentFormat": ["markdown", "plaintext"] },
                     "definition": { "linkSupport": true },
                     "references": {},
                     "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
                     "publishDiagnostics": { "relatedInformation": true },
-                    "diagnostic": {}
+                    "synchronization": { "didSave": true }
                 },
                 "workspace": {
                     "symbol": {},
@@ -155,10 +172,11 @@ impl LspClient {
         });
 
         let init_result = client.request("initialize", init_params, init_timeout)?;
-        client.supports_pull_diagnostics = init_result
-            .get("capabilities")
-            .and_then(|c| c.get("diagnosticProvider"))
-            .is_some_and(|v| !v.is_null() && v != &Value::Bool(false));
+        let server_name = init_result
+            .pointer("/serverInfo/name")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        client.uses_flycheck = kind == LanguageKind::Rust && server_name.eq_ignore_ascii_case("rust-analyzer");
 
         client.notify("initialized", json!({}))?;
         Ok(client)
@@ -189,13 +207,18 @@ impl LspClient {
 
     /// Ensure `file` is open and up to date with its on-disk content. Returns `(uri, changed)`.
     pub fn sync_document(&self, file: &Path) -> Result<(String, bool)> {
+        let (uri, state) = self.sync_document_state(file)?;
+        Ok((uri, state != SyncState::Unchanged))
+    }
+
+    fn sync_document_state(&self, file: &Path) -> Result<(String, SyncState)> {
         self.touch();
         let uri = path_to_uri(file)?;
         let content = std::fs::read_to_string(file)?;
         let mut docs = self.open_docs.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(doc) = docs.get_mut(&uri) {
             if doc.content == content {
-                return Ok((uri, false));
+                return Ok((uri, SyncState::Unchanged));
             }
             doc.version += 1;
             doc.content = content.clone();
@@ -208,7 +231,10 @@ impl LspClient {
                     "contentChanges": [{ "text": content }],
                 }),
             )?;
-            return Ok((uri, true));
+            if self.uses_flycheck {
+                self.notify("textDocument/didSave", json!({ "textDocument": { "uri": uri } }))?;
+            }
+            return Ok((uri, SyncState::Changed));
         }
 
         let language_id = self.kind.lsp_language_id(file);
@@ -231,36 +257,66 @@ impl LspClient {
                 }
             }),
         )?;
-        Ok((uri, true))
+        Ok((uri, SyncState::Opened))
     }
 
-    /// Fetch diagnostics for `file`, using pull diagnostics when supported or waiting for `publishDiagnostics`.
-    pub fn diagnostics(&self, file: &Path, wait: Duration, timeout: Duration) -> Result<Vec<DiagnosticItem>> {
+    /// Fetch diagnostics for `file`, waiting for `publishDiagnostics` (and `rust-analyzer` flycheck when active).
+    pub fn diagnostics(&self, file: &Path, wait: Duration, _timeout: Duration) -> Result<Vec<DiagnosticItem>> {
         let key = normalize_uri(&path_to_uri(file)?);
-        let prev_seq = {
+        let (prev_seq, prev_flycheck) = {
             let store = self.shared.diagnostics.lock().unwrap_or_else(|e| e.into_inner());
-            store.by_uri.get(&key).map(|(s, _)| *s).unwrap_or(0)
+            (
+                store.by_uri.get(&key).map(|(s, _)| *s).unwrap_or(0),
+                store.flycheck_completed,
+            )
         };
-        let (uri, changed) = self.sync_document(file)?;
+        let (uri, state) = self.sync_document_state(file)?;
 
-        if self.supports_pull_diagnostics {
-            if let Ok(val) = self.request(
-                "textDocument/diagnostic",
-                json!({ "textDocument": { "uri": uri } }),
-                timeout,
-            ) {
-                if let Some(items) = val.get("items").and_then(Value::as_array) {
-                    return Ok(items.iter().filter_map(parse_diagnostic).collect());
-                }
-            }
+        // When rust-analyzer has already finished its initial workspace flycheck and we open
+        // a newly-touched file, emit `didSave` so checkOnSave triggers a fresh cargo check.
+        if self.uses_flycheck && state == SyncState::Opened && prev_flycheck > 0 {
+            self.notify("textDocument/didSave", json!({ "textDocument": { "uri": uri } }))?;
         }
 
-        // Wait up to `wait` for a fresh publishDiagnostics notification.
+        let target_flycheck = if state != SyncState::Unchanged {
+            prev_flycheck + 1
+        } else {
+            prev_flycheck.max(1)
+        };
+
+        // Wait up to `wait` for fresh diagnostics (and flycheck completion on rust-analyzer).
         let deadline = Instant::now() + wait;
+        let mut flycheck_settle_deadline: Option<Instant> = None;
         let mut store = self.shared.diagnostics.lock().unwrap_or_else(|e| e.into_inner());
         loop {
-            if let Some((seq, items)) = store.by_uri.get(&key) {
-                if !changed || *seq > prev_seq {
+            if self.uses_flycheck {
+                if store.flycheck_completed >= target_flycheck && store.flycheck_active == 0 {
+                    let cur_seq = store.by_uri.get(&key).map(|(s, _)| *s).unwrap_or(0);
+                    // rust-analyzer may flush the final `publishDiagnostics` (especially when
+                    // clearing diagnostics to `[]`) right after sending `$/progress` `end`.
+                    // If a publish for this flycheck run has already arrived (or the doc was
+                    // unchanged), return immediately; otherwise give it a brief settle window.
+                    let already_flushed = state == SyncState::Unchanged || cur_seq > store.flycheck_begin_seq;
+                    let settle_until = *flycheck_settle_deadline
+                        .get_or_insert_with(|| (Instant::now() + Duration::from_millis(250)).min(deadline));
+                    if already_flushed || Instant::now() >= settle_until {
+                        return Ok(store
+                            .by_uri
+                            .get(&key)
+                            .map(|(_, items)| items.clone())
+                            .unwrap_or_default());
+                    }
+                    let wait_for = settle_until.saturating_duration_since(Instant::now());
+                    let (guard, _) = self
+                        .shared
+                        .diag_cv
+                        .wait_timeout(store, wait_for)
+                        .unwrap_or_else(|e| e.into_inner());
+                    store = guard;
+                    continue;
+                }
+            } else if let Some((seq, items)) = store.by_uri.get(&key) {
+                if state == SyncState::Unchanged || *seq > prev_seq {
                     return Ok(items.clone());
                 }
             }
@@ -528,6 +584,31 @@ fn reader_loop<R: Read>(stdout: R, shared: Arc<SharedState>, stdin: Arc<Mutex<Ch
                     }
                 }
             }
+            (false, Some("$/progress")) => {
+                if let Some(params) = msg.get("params") {
+                    let is_flycheck = params
+                        .get("token")
+                        .and_then(Value::as_str)
+                        .is_some_and(|t| t.starts_with("rust-analyzer/flycheck"));
+                    if is_flycheck {
+                        if let Some(kind) = params.pointer("/value/kind").and_then(Value::as_str) {
+                            let mut store = shared.diagnostics.lock().unwrap_or_else(|e| e.into_inner());
+                            match kind {
+                                "begin" => {
+                                    store.flycheck_active += 1;
+                                    store.flycheck_begin_seq = store.seq;
+                                }
+                                "end" => {
+                                    store.flycheck_active = store.flycheck_active.saturating_sub(1);
+                                    store.flycheck_completed += 1;
+                                    shared.diag_cv.notify_all();
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -540,6 +621,7 @@ fn reader_loop<R: Read>(stdout: R, shared: Arc<SharedState>, stdin: Arc<Mutex<Ch
     for tx in waiters {
         let _ = tx.send(Err(LspError::Disconnected));
     }
+    shared.diag_cv.notify_all();
 }
 
 fn parse_diagnostic(val: &Value) -> Option<DiagnosticItem> {

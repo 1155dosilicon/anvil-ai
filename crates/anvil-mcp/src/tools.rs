@@ -100,17 +100,17 @@ impl ToolRegistry {
             }),
             json!({
                 "name": "cc_build",
-                "description": "Build a C/C++ project with CMake+Ninja (generating compile_commands.json for clangd) or compile a single C/C++ file directly with Clang.",
+                "description": "Build a C/C++ project with CMake+Ninja (generating compile_commands.json for clangd) or compile a single C/C++ file directly with Clang (when `file` is set and `output` is omitted, writes `<stem>[.exe]` alongside the source file).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "workspace": { "type": "string", "description": "Project root directory (defaults to server workspace)." },
                         "file": { "type": "string", "description": "Optional single C/C++ file to compile directly with clang/clang++." },
-                        "output": { "type": "string", "description": "Optional output executable path for single-file compilation." },
+                        "output": { "type": "string", "description": "Optional output executable path for single-file compilation (defaults to `<stem>[.exe]` alongside the source file)." },
                         "build_dir": { "type": "string", "description": "CMake build directory relative to workspace (default 'build')." },
                         "build_type": { "type": "string", "description": "CMAKE_BUILD_TYPE (default 'Debug')." },
                         "target": { "type": "string", "description": "Optional CMake target name." },
-                        "extra_args": { "type": "array", "items": { "type": "string" }, "description": "Extra CMake configure or compiler flags." },
+                        "extra_args": { "type": "array", "items": { "type": "string" }, "description": "Extra CMake configure or compiler flags (single-file mode adds -Wall -Wextra unless already provided)." },
                         "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default 180)." }
                     }
                 }
@@ -137,7 +137,7 @@ impl ToolRegistry {
                     "type": "object",
                     "properties": {
                         "file": { "type": "string", "description": "Path to the .rs, .c, .cpp or header file." },
-                        "wait_ms": { "type": "integer", "description": "Milliseconds to wait for fresh diagnostics after syncing the file (default 1200)." }
+                        "wait_ms": { "type": "integer", "description": "Milliseconds to wait for fresh diagnostics after syncing the file (default 10000 for Rust, 1200 for C/C++)." }
                     },
                     "required": ["file"]
                 }
@@ -348,7 +348,7 @@ impl ToolRegistry {
         let wait = args
             .get("wait_ms")
             .and_then(Value::as_u64)
-            .map(|ms| Duration::from_millis(ms.clamp(50, 15_000)));
+            .map(|ms| Duration::from_millis(ms.clamp(50, 60_000)));
         match self.lsp.diagnostics(Path::new(file), wait) {
             Ok(items) => ToolCallOutcome::ok(json!({
                 "ok": true,

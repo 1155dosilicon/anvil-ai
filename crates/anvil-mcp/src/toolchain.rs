@@ -14,7 +14,7 @@ use serde_json::Value;
 const MAX_OUTPUT_CHARS: usize = 12_000;
 const MAX_DIAGNOSTICS: usize = 60;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CompilerDiagnostic {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
@@ -28,10 +28,26 @@ pub struct CompilerDiagnostic {
     pub message: String,
 }
 
+/// Where the executed toolchain binary was resolved from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolchainSource {
+    Anvil,
+    Path,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedTool {
+    pub path: PathBuf,
+    pub source: ToolchainSource,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolchainRunReport {
     pub ok: bool,
     pub tool: String,
+    pub toolchain: ToolchainSource,
+    pub warnings: Vec<String>,
     pub command: Vec<String>,
     pub cwd: PathBuf,
     pub exit_code: Option<i32>,
@@ -46,10 +62,13 @@ pub struct ToolchainRunReport {
 }
 
 /// Resolve an Anvil-managed tool binary, falling back to `PATH` so MCP works in hybrid environments too.
-pub fn resolve_tool(layout: &InstallLayout, name: &str) -> Option<PathBuf> {
+pub fn resolve_tool(layout: &InstallLayout, name: &str) -> Option<ResolvedTool> {
     if let Some(tool) = managed_tool(name) {
         if let Some(path) = find_real_tool(layout, tool) {
-            return Some(path);
+            return Some(ResolvedTool {
+                path,
+                source: ToolchainSource::Anvil,
+            });
         }
     }
     let exe_name = format!("{name}{}", std::env::consts::EXE_SUFFIX);
@@ -57,10 +76,23 @@ pub fn resolve_tool(layout: &InstallLayout, name: &str) -> Option<PathBuf> {
     for dir in std::env::split_paths(&path_var) {
         let candidate = dir.join(&exe_name);
         if candidate.is_file() {
-            return Some(candidate);
+            return Some(ResolvedTool {
+                path: candidate,
+                source: ToolchainSource::Path,
+            });
         }
     }
     None
+}
+
+fn path_fallback_warning(layout: &InstallLayout, tool_name: &str, resolved: &ResolvedTool) -> Option<String> {
+    (resolved.source == ToolchainSource::Path).then(|| {
+        format!(
+            "{tool_name} not found in Anvil toolchains at {}; falling back to PATH ({})",
+            layout.root().display(),
+            resolved.path.display()
+        )
+    })
 }
 
 pub struct CargoRequest {
@@ -77,24 +109,42 @@ pub struct CargoRequest {
 pub fn run_cargo(layout: &InstallLayout, req: &CargoRequest) -> Result<ToolchainRunReport, String> {
     let cargo = resolve_tool(layout, "cargo")
         .ok_or_else(|| "cargo not found in Anvil toolchains or PATH (run `anvil install`)".to_string())?;
+    let warnings: Vec<String> = path_fallback_warning(layout, "cargo", &cargo).into_iter().collect();
+
+    let has_message_format = req
+        .extra_args
+        .iter()
+        .any(|a| a == "--message-format" || a.starts_with("--message-format="));
 
     let mut args: Vec<String> = Vec::new();
     let json_diags = match req.action.as_str() {
         "check" => {
-            args.extend(["check".into(), "--message-format=json".into()]);
+            args.push("check".into());
+            if !has_message_format {
+                args.push("--message-format=json".into());
+            }
             true
         }
         "build" => {
-            args.extend(["build".into(), "--message-format=json".into()]);
+            args.push("build".into());
+            if !has_message_format {
+                args.push("--message-format=json".into());
+            }
             true
         }
         "clippy" => {
-            args.extend(["clippy".into(), "--all-targets".into(), "--message-format=json".into()]);
+            args.extend(["clippy".into(), "--all-targets".into()]);
+            if !has_message_format {
+                args.push("--message-format=json".into());
+            }
             true
         }
         "test" => {
             args.push("test".into());
-            false
+            if !has_message_format {
+                args.push("--message-format=json".into());
+            }
+            true
         }
         "fmt_check" => {
             args.extend(["fmt".into(), "--check".into()]);
@@ -126,9 +176,11 @@ pub fn run_cargo(layout: &InstallLayout, req: &CargoRequest) -> Result<Toolchain
     }
     args.extend(req.extra_args.iter().cloned());
 
-    let mut cmd = Command::new(&cargo);
+    let mut cmd = Command::new(&cargo.path);
     cmd.args(&args).current_dir(&req.workspace);
-    ToolEnv::for_layout(layout).apply(&mut cmd);
+    if cargo.source == ToolchainSource::Anvil {
+        ToolEnv::for_layout(layout).apply(&mut cmd);
+    }
 
     let out = run_with_timeout(&mut cmd, req.timeout).map_err(|e| format!("failed to run cargo: {e}"))?;
 
@@ -140,12 +192,14 @@ pub fn run_cargo(layout: &InstallLayout, req: &CargoRequest) -> Result<Toolchain
     let (stdout, trunc_out) = truncate_output(&clean_stdout, MAX_OUTPUT_CHARS);
     let (stderr, trunc_err) = truncate_output(&out.stderr, MAX_OUTPUT_CHARS);
 
-    let mut full_cmd = vec![cargo.display().to_string()];
+    let mut full_cmd = vec![cargo.path.display().to_string()];
     full_cmd.extend(args);
 
     Ok(ToolchainRunReport {
         ok: out.success(),
         tool: "cargo".into(),
+        toolchain: cargo.source,
+        warnings,
         command: full_cmd,
         cwd: req.workspace.clone(),
         exit_code: out.status.and_then(|s| s.code()),
@@ -186,6 +240,12 @@ pub fn run_cc_build(layout: &InstallLayout, req: &CcBuildRequest) -> Result<Tool
 
     let cmake = resolve_tool(layout, "cmake")
         .ok_or_else(|| "cmake not found in Anvil toolchains or PATH (run `anvil install`)".to_string())?;
+    let mut warnings = Vec::new();
+    let mut toolchain = cmake.source;
+    if let Some(w) = path_fallback_warning(layout, "cmake", &cmake) {
+        warnings.push(w);
+    }
+
     let build_path = req.workspace.join(&req.build_dir);
     let env = ToolEnv::for_layout(layout);
 
@@ -201,27 +261,39 @@ pub fn run_cc_build(layout: &InstallLayout, req: &CcBuildRequest) -> Result<Tool
         format!("-DCMAKE_BUILD_TYPE={}", req.build_type),
     ];
     if let Some(clang) = resolve_tool(layout, "clang") {
-        cfg_args.push(format!("-DCMAKE_C_COMPILER={}", clang.display()));
+        if let Some(w) = path_fallback_warning(layout, "clang", &clang) {
+            toolchain = ToolchainSource::Path;
+            warnings.push(w);
+        }
+        cfg_args.push(format!("-DCMAKE_C_COMPILER={}", clang.path.display()));
     }
     if let Some(clangxx) = resolve_tool(layout, "clang++") {
-        cfg_args.push(format!("-DCMAKE_CXX_COMPILER={}", clangxx.display()));
+        if let Some(w) = path_fallback_warning(layout, "clang++", &clangxx) {
+            toolchain = ToolchainSource::Path;
+            warnings.push(w);
+        }
+        cfg_args.push(format!("-DCMAKE_CXX_COMPILER={}", clangxx.path.display()));
     }
     cfg_args.extend(req.extra_args.iter().cloned());
 
-    let mut cfg_cmd = Command::new(&cmake);
+    let mut cfg_cmd = Command::new(&cmake.path);
     cfg_cmd.args(&cfg_args).current_dir(&req.workspace);
-    env.apply(&mut cfg_cmd);
+    if cmake.source == ToolchainSource::Anvil {
+        env.apply(&mut cfg_cmd);
+    }
     let cfg_out =
         run_with_timeout(&mut cfg_cmd, req.timeout).map_err(|e| format!("failed to run cmake configure: {e}"))?;
     if !cfg_out.success() {
         let diagnostics = parse_clang_diagnostics(&cfg_out.stderr);
         let (stdout, t1) = truncate_output(&cfg_out.stdout, MAX_OUTPUT_CHARS);
         let (stderr, t2) = truncate_output(&cfg_out.stderr, MAX_OUTPUT_CHARS);
-        let mut full = vec![cmake.display().to_string()];
+        let mut full = vec![cmake.path.display().to_string()];
         full.extend(cfg_args);
         return Ok(ToolchainRunReport {
             ok: false,
             tool: "cmake".into(),
+            toolchain,
+            warnings,
             command: full,
             cwd: req.workspace.clone(),
             exit_code: cfg_out.status.and_then(|s| s.code()),
@@ -242,9 +314,11 @@ pub fn run_cc_build(layout: &InstallLayout, req: &CcBuildRequest) -> Result<Tool
             build_args.extend(["--target".into(), target.clone()]);
         }
     }
-    let mut build_cmd = Command::new(&cmake);
+    let mut build_cmd = Command::new(&cmake.path);
     build_cmd.args(&build_args).current_dir(&req.workspace);
-    env.apply(&mut build_cmd);
+    if cmake.source == ToolchainSource::Anvil {
+        env.apply(&mut build_cmd);
+    }
     let build_out =
         run_with_timeout(&mut build_cmd, req.timeout).map_err(|e| format!("failed to run cmake build: {e}"))?;
 
@@ -255,12 +329,14 @@ pub fn run_cc_build(layout: &InstallLayout, req: &CcBuildRequest) -> Result<Tool
     let diagnostics = parse_clang_diagnostics(&combined_diag_text);
     let (stdout, t1) = truncate_output(&build_out.stdout, MAX_OUTPUT_CHARS);
     let (stderr, t2) = truncate_output(&build_out.stderr, MAX_OUTPUT_CHARS);
-    let mut full = vec![cmake.display().to_string()];
+    let mut full = vec![cmake.path.display().to_string()];
     full.extend(build_args);
 
     Ok(ToolchainRunReport {
         ok: build_out.success(),
         tool: "cmake".into(),
+        toolchain,
+        warnings,
         command: full,
         cwd: req.workspace.clone(),
         exit_code: build_out.status.and_then(|s| s.code()),
@@ -295,38 +371,55 @@ fn compile_single_cc_file(
     let tool_name = if is_cpp { "clang++" } else { "clang" };
     let compiler = resolve_tool(layout, tool_name)
         .ok_or_else(|| format!("{tool_name} not found in Anvil toolchains or PATH (run `anvil install`)"))?;
+    let warnings: Vec<String> = path_fallback_warning(layout, tool_name, &compiler)
+        .into_iter()
+        .collect();
 
-    let out_path = req.output.clone().unwrap_or_else(|| {
-        let stem = abs_file
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "a".into());
-        req.workspace.join(format!("{stem}{}", std::env::consts::EXE_SUFFIX))
-    });
+    let source_dir = abs_file
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(&req.workspace);
+    let out_path = match &req.output {
+        Some(p) if p.is_absolute() => p.clone(),
+        Some(p) => req.workspace.join(p),
+        None => {
+            let stem = abs_file
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "a".into());
+            source_dir.join(format!("{stem}{}", std::env::consts::EXE_SUFFIX))
+        }
+    };
 
-    let mut args = vec![
-        "-Wall".into(),
-        "-Wextra".into(),
-        abs_file.display().to_string(),
-        "-o".into(),
-        out_path.display().to_string(),
-    ];
+    let mut args = Vec::new();
+    for default_flag in ["-Wall", "-Wextra"] {
+        if !req.extra_args.iter().any(|a| a == default_flag) {
+            args.push(default_flag.into());
+        }
+    }
+    args.push(abs_file.display().to_string());
+    args.push("-o".into());
+    args.push(out_path.display().to_string());
     args.extend(req.extra_args.iter().cloned());
 
-    let mut cmd = Command::new(&compiler);
+    let mut cmd = Command::new(&compiler.path);
     cmd.args(&args).current_dir(&req.workspace);
-    ToolEnv::for_layout(layout).apply(&mut cmd);
+    if compiler.source == ToolchainSource::Anvil {
+        ToolEnv::for_layout(layout).apply(&mut cmd);
+    }
 
     let out = run_with_timeout(&mut cmd, req.timeout).map_err(|e| format!("failed to run {tool_name}: {e}"))?;
     let diagnostics = parse_clang_diagnostics(&out.stderr);
     let (stdout, t1) = truncate_output(&out.stdout, MAX_OUTPUT_CHARS);
     let (stderr, t2) = truncate_output(&out.stderr, MAX_OUTPUT_CHARS);
-    let mut full = vec![compiler.display().to_string()];
+    let mut full = vec![compiler.path.display().to_string()];
     full.extend(args);
 
     Ok(ToolchainRunReport {
         ok: out.success(),
         tool: tool_name.into(),
+        toolchain: compiler.source,
+        warnings,
         command: full,
         cwd: req.workspace.clone(),
         exit_code: out.status.and_then(|s| s.code()),
@@ -365,6 +458,7 @@ pub fn run_cc_lint_format(layout: &InstallLayout, req: &CcLintFormatRequest) -> 
     };
     let bin = resolve_tool(layout, tool_name)
         .ok_or_else(|| format!("{tool_name} not found in Anvil toolchains or PATH (run `anvil install`)"))?;
+    let warnings: Vec<String> = path_fallback_warning(layout, tool_name, &bin).into_iter().collect();
 
     let mut args: Vec<String> = Vec::new();
     match (tool_name, req.mode.as_str()) {
@@ -385,20 +479,24 @@ pub fn run_cc_lint_format(layout: &InstallLayout, req: &CcLintFormatRequest) -> 
     }
     args.extend(req.files.iter().cloned());
 
-    let mut cmd = Command::new(&bin);
+    let mut cmd = Command::new(&bin.path);
     cmd.args(&args).current_dir(&req.workspace);
-    ToolEnv::for_layout(layout).apply(&mut cmd);
+    if bin.source == ToolchainSource::Anvil {
+        ToolEnv::for_layout(layout).apply(&mut cmd);
+    }
 
     let out = run_with_timeout(&mut cmd, req.timeout).map_err(|e| format!("failed to run {tool_name}: {e}"))?;
     let diagnostics = parse_clang_diagnostics(&format!("{}\n{}", out.stdout, out.stderr));
     let (stdout, t1) = truncate_output(&out.stdout, MAX_OUTPUT_CHARS);
     let (stderr, t2) = truncate_output(&out.stderr, MAX_OUTPUT_CHARS);
-    let mut full = vec![bin.display().to_string()];
+    let mut full = vec![bin.path.display().to_string()];
     full.extend(args);
 
     Ok(ToolchainRunReport {
         ok: out.success(),
         tool: tool_name.into(),
+        toolchain: bin.source,
+        warnings,
         command: full,
         cwd: req.workspace.clone(),
         exit_code: out.status.and_then(|s| s.code()),
@@ -429,8 +527,14 @@ pub fn parse_cargo_json_diagnostics(raw: &str) -> (Vec<CompilerDiagnostic>, Stri
             non_json_lines.push(line);
             continue;
         };
-        if val.get("reason").and_then(Value::as_str) != Some("compiler-message") {
-            continue;
+        match val.get("reason").and_then(Value::as_str) {
+            Some("compiler-message") => {}
+            Some("compiler-artifact" | "build-script-executed" | "build-finished") => continue,
+            _ => {
+                // Not a Cargo JSON message (e.g. JSON printed by a test): preserve in stdout.
+                non_json_lines.push(line);
+                continue;
+            }
         }
         let Some(msg) = val.get("message") else {
             continue;
@@ -460,15 +564,16 @@ pub fn parse_cargo_json_diagnostics(raw: &str) -> (Vec<CompilerDiagnostic>, Stri
             .and_then(Value::as_u64)
             .map(|n| n as u32);
 
-        if diags.len() < MAX_DIAGNOSTICS {
-            diags.push(CompilerDiagnostic {
-                file,
-                line: line_no,
-                col: col_no,
-                level,
-                code,
-                message: text,
-            });
+        let diag = CompilerDiagnostic {
+            file,
+            line: line_no,
+            col: col_no,
+            level,
+            code,
+            message: text,
+        };
+        if diags.len() < MAX_DIAGNOSTICS && !diags.contains(&diag) {
+            diags.push(diag);
         }
     }
 
@@ -563,5 +668,56 @@ mod tests {
         assert_eq!(diags[0].level, "error");
         assert_eq!(diags[1].file.as_deref(), Some("/src/app.cpp"));
         assert_eq!(diags[1].level, "warning");
+    }
+
+    #[test]
+    fn parses_cargo_test_json_separating_harness_and_deduplicating() {
+        let warn = "{\"reason\":\"compiler-message\",\"message\":{\"level\":\"warning\",\"code\":{\"code\":\"unused_variables\"},\"message\":\"unused variable: `x`\",\"spans\":[{\"file_name\":\"src/lib.rs\",\"line_start\":2,\"column_start\":9,\"is_primary\":true}]}}\n";
+        let sample = format!(
+            concat!(
+                "{{\"reason\":\"compiler-artifact\",\"target\":{{\"name\":\"demo\"}}}}\n",
+                "{warn}",
+                "{warn}",
+                "{{\"reason\":\"build-finished\",\"success\":true}}\n",
+                "running 1 test\n",
+                "{{\"custom_test_output\":true}}\n",
+                "test works ... ok\n",
+                "test result: ok. 1 passed; 0 failed; 0 ignored\n",
+            ),
+            warn = warn
+        );
+        let (diags, rest) = parse_cargo_json_diagnostics(&sample);
+        assert_eq!(diags.len(), 1, "duplicate lib/test diagnostic should be deduplicated");
+        assert_eq!(diags[0].level, "warning");
+        assert_eq!(diags[0].code.as_deref(), Some("unused_variables"));
+        assert_eq!(diags[0].file.as_deref(), Some("src/lib.rs"));
+        assert_eq!(diags[0].line, Some(2));
+        assert!(rest.contains("running 1 test"), "{rest}");
+        assert!(rest.contains("{\"custom_test_output\":true}"), "{rest}");
+        assert!(rest.contains("test result: ok."), "{rest}");
+        assert!(!rest.contains("compiler-message"), "{rest}");
+    }
+
+    #[test]
+    fn resolve_tool_distinguishes_anvil_and_path_sources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = InstallLayout::new(tmp.path());
+
+        // Empty layout falls back to PATH (cargo is on PATH during `cargo test`).
+        let from_path = resolve_tool(&layout, "cargo").expect("cargo available on PATH");
+        assert_eq!(from_path.source, ToolchainSource::Path);
+        assert!(path_fallback_warning(&layout, "cargo", &from_path).is_some());
+
+        // Once present in Anvil's toolchains/rust/bin, source is Anvil with no warning.
+        let anvil_cargo = layout
+            .toolchain_dir("rust")
+            .join("bin")
+            .join(format!("cargo{}", std::env::consts::EXE_SUFFIX));
+        std::fs::create_dir_all(anvil_cargo.parent().unwrap()).unwrap();
+        std::fs::write(&anvil_cargo, b"stub").unwrap();
+        let from_anvil = resolve_tool(&layout, "cargo").unwrap();
+        assert_eq!(from_anvil.source, ToolchainSource::Anvil);
+        assert_eq!(from_anvil.path, anvil_cargo);
+        assert!(path_fallback_warning(&layout, "cargo", &from_anvil).is_none());
     }
 }

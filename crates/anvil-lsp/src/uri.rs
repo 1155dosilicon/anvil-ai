@@ -61,11 +61,12 @@ pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
     // Windows drive URI: `/C:/foo/bar` or `/c:/foo/bar`.
     let bytes = decoded.as_bytes();
     if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':' {
-        let win = &decoded[1..];
+        let drive = (bytes[1] as char).to_ascii_uppercase();
+        let rest = &decoded[2..];
         if cfg!(windows) {
-            return Some(PathBuf::from(win.replace('/', "\\")));
+            return Some(PathBuf::from(format!("{drive}{}", rest.replace('/', "\\"))));
         }
-        return Some(PathBuf::from(win));
+        return Some(PathBuf::from(format!("{drive}{rest}")));
     }
 
     Some(PathBuf::from(decoded))
@@ -148,9 +149,25 @@ mod tests {
     fn percent_encoded_colon_decodes_cleanly() {
         let back = uri_to_path("file:///c%3A/dev/hello.c").unwrap();
         if cfg!(windows) {
-            assert_eq!(back, PathBuf::from(r"c:\dev\hello.c"));
+            assert_eq!(back, PathBuf::from(r"C:\dev\hello.c"));
         } else {
-            assert_eq!(back, PathBuf::from("c:/dev/hello.c"));
+            assert_eq!(back, PathBuf::from("C:/dev/hello.c"));
+        }
+    }
+
+    #[test]
+    fn windows_lowercase_drive_uri_normalizes_to_uppercase() {
+        let back = uri_to_path("file:///c:/Users/Eli/rtest/src/main.rs").unwrap();
+        if cfg!(windows) {
+            assert_eq!(back, PathBuf::from(r"C:\Users\Eli\rtest\src\main.rs"));
+        } else {
+            assert_eq!(back, PathBuf::from("C:/Users/Eli/rtest/src/main.rs"));
+        }
+        let d_back = uri_to_path("file:///d:/anvil/src/lib.rs").unwrap();
+        if cfg!(windows) {
+            assert_eq!(d_back, PathBuf::from(r"D:\anvil\src\lib.rs"));
+        } else {
+            assert_eq!(d_back, PathBuf::from("D:/anvil/src/lib.rs"));
         }
     }
 }

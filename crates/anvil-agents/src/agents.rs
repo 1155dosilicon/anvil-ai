@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anvil_core::error::IoContext;
-use anvil_core::{EnvMode, InstallLayout};
+use anvil_core::{EnvMode, InstallLayout, ANVIL_HOME_ENV};
 use serde::Serialize;
 
 use crate::config::{self, ConfigFormat, McpEntry};
@@ -294,8 +294,19 @@ impl AgentContext {
         Ok(exe)
     }
 
+    /// Absolute path of `ANVIL_HOME`.
+    pub fn install_dir(&self) -> Result<PathBuf> {
+        let root = self.layout.root();
+        if root.is_absolute() {
+            Ok(root.to_path_buf())
+        } else {
+            Ok(anvil_core::paths::absolutize(root)?)
+        }
+    }
+
     pub fn entry(&self) -> Result<McpEntry> {
-        Ok(McpEntry::new(self.anvil_exe()?.display().to_string()))
+        let home = self.install_dir()?.display().to_string();
+        Ok(McpEntry::new(self.anvil_exe()?.display().to_string()).with_env(ANVIL_HOME_ENV, home))
     }
 
     pub fn is_detected(&self, id: AgentId) -> bool {

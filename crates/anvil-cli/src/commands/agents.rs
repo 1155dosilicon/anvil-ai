@@ -7,7 +7,7 @@ use anvil_agents::{
     detect_all, generic_snippet, parse_agent_list, remove_agent, setup_agent, Action, AgentContext, AgentId,
     AgentReport, ConfigFormat, RemoveOptions, Selection, SetupOptions,
 };
-use anvil_core::paths::resolve_install_dir;
+use anvil_core::paths::resolve_existing_install_dir;
 use anvil_core::{EnvMode, InstallLayout, InstallState};
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -26,9 +26,9 @@ pub fn run(args: &AgentsArgs) -> Result<Outcome> {
     }
 }
 
-/// Agent context for the installation at `--dest` (default install dir otherwise).
+/// Agent context for the installation at `--dest` (auto-detected install dir otherwise).
 pub fn context(dest: Option<&Path>) -> Result<AgentContext> {
-    let layout = InstallLayout::new(resolve_install_dir(dest)?);
+    let layout = InstallLayout::new(resolve_existing_install_dir(dest)?);
     Ok(AgentContext::new(&EnvMode::from_process_env(), layout)?)
 }
 

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anvil_agents::{remove_agent, Action, AgentContext, AgentId, AgentReport, RemoveOptions};
-use anvil_core::paths::resolve_install_dir;
+use anvil_core::paths::resolve_existing_install_dir;
 use anvil_core::{InstallLayout, InstallState};
 use anvil_env::{remove_user_env, EnvMode};
 use anyhow::{bail, Result};
@@ -14,7 +14,7 @@ use crate::commands::agents;
 use crate::output::{confirm, Outcome};
 
 pub fn run(args: &UninstallArgs) -> Result<Outcome> {
-    let install_dir = resolve_install_dir(args.dest.as_deref())?;
+    let install_dir = resolve_existing_install_dir(args.dest.as_deref())?;
     let layout = InstallLayout::new(&install_dir);
     // Safety net: only ever delete directories that carry an anvil state file.
     let Some(state) = InstallState::load(&layout.state_file())? else {
