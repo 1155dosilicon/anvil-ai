@@ -187,11 +187,28 @@ fn spec(paths: &AgentPaths, id: AgentId) -> AgentSpec {
             }
         }
         AgentId::Antigravity => {
-            let dir = paths.antigravity_dir();
+            let global = paths.gemini_config_dir();
+            let legacy = paths.antigravity_dir();
             AgentSpec {
-                detect: vec![dir.clone()],
-                mcp: vec![json("config", dir.join("mcp_config.json"), false, Condition::Always)],
-                skills: vec![folder(dir.join("skills"))],
+                detect: vec![global.clone(), legacy.clone()],
+                mcp: vec![
+                    json("global", global.join("mcp_config.json"), false, Condition::Always),
+                    json(
+                        "legacy",
+                        legacy.join("mcp_config.json"),
+                        false,
+                        Condition::ParentExistsOrForced,
+                    ),
+                ],
+                skills: vec![
+                    folder(global.join("skills")),
+                    SkillTarget {
+                        dir: legacy.join("skills"),
+                        layout: SkillLayout::Folder,
+                        condition: Condition::DirExists,
+                        gate: Some(legacy),
+                    },
+                ],
             }
         }
     }

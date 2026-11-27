@@ -166,14 +166,17 @@ fn install_configures_agents_and_uninstall_cleans_up_surgically() {
     assert_eq!(doc["sandbox"], true);
     for status in doc["agents"].as_array().unwrap() {
         assert_eq!(status["configured"], true, "{status:#}");
-        let synced: u64 = status["skills"]
+        let applicable_skills: Vec<&Value> = status["skills"]
             .as_array()
             .unwrap()
             .iter()
             .filter(|s| s["applicable"] == true)
-            .map(|s| s["synced"].as_u64().unwrap())
-            .sum();
-        assert_eq!(synced, 5, "{status:#}");
+            .collect();
+        assert!(!applicable_skills.is_empty(), "{status:#}");
+        for s in applicable_skills {
+            assert_eq!(s["synced"].as_u64(), Some(5), "{status:#}");
+            assert_eq!(s["total"].as_u64(), Some(5), "{status:#}");
+        }
         for m in status["mcp"].as_array().unwrap() {
             assert_eq!(m["points_to_this_install"], true, "{m:#}");
             assert_eq!(m["command_exists"], true, "{m:#}");
@@ -295,7 +298,7 @@ fn install_configures_agents_and_uninstall_cleans_up_surgically() {
     }
     let backups_dir = PathBuf::from(doc["agents"]["backups_dir"].as_str().unwrap());
     assert!(backups_dir.starts_with(&sandbox), "sandbox backups stay in the sandbox");
-    assert_eq!(backups(&backups_dir), 5);
+    assert_eq!(backups(&backups_dir), 6);
 
     let sf = read_json(&agents.sf_config);
     assert_eq!(

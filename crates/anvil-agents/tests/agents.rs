@@ -320,18 +320,25 @@ fn codex_without_shared_agents_dir_does_not_create_it() {
 #[test]
 fn antigravity_merge_and_removal() {
     let env = Env::new();
-    let config = env.home().join(".gemini/antigravity/mcp_config.json");
+    let global = env.home().join(".gemini/config/mcp_config.json");
+    let legacy = env.home().join(".gemini/antigravity/mcp_config.json");
     write(
-        &config,
+        &legacy,
         r#"{"mcpServers": {"browser": {"command": "b", "env": {"K": "V"}}}}"#,
     );
 
     let report = setup_agent(&env.ctx, AgentId::Antigravity, DEFAULT);
     assert!(report.ok, "{:?}", report.errors);
-    assert_eq!(actions(&report), vec![Action::Updated]);
-    let v = read_json(&config);
-    assert_eq!(v["mcpServers"]["browser"]["env"]["K"], "V");
-    assert_eq!(v["mcpServers"]["anvil"]["command"], env.exe());
+    assert_eq!(actions(&report), vec![Action::Created, Action::Updated]);
+    let vg = read_json(&global);
+    assert_eq!(vg["mcpServers"]["anvil"]["command"], env.exe());
+    let vl = read_json(&legacy);
+    assert_eq!(vl["mcpServers"]["browser"]["env"]["K"], "V");
+    assert_eq!(vl["mcpServers"]["anvil"]["command"], env.exe());
+    assert!(env
+        .home()
+        .join(".gemini/config/skills/cmake-ninja-debug/SKILL.md")
+        .is_file());
     assert!(env
         .home()
         .join(".gemini/antigravity/skills/cmake-ninja-debug/SKILL.md")
@@ -340,9 +347,9 @@ fn antigravity_merge_and_removal() {
     assert!(!setup_agent(&env.ctx, AgentId::Antigravity, DEFAULT).changed());
 
     // A stale entry (anvil moved) is updated in place and detected beforehand.
-    let mut stale = read_json(&config);
+    let mut stale = read_json(&legacy);
     stale["mcpServers"]["anvil"]["command"] = json!("/old/place/anvil");
-    write(&config, &serde_json::to_string(&stale).unwrap());
+    write(&legacy, &serde_json::to_string(&stale).unwrap());
     let status = detect_agent(&env.ctx, AgentId::Antigravity);
     assert!(!status.configured);
     assert!(
@@ -352,17 +359,19 @@ fn antigravity_merge_and_removal() {
     );
     assert_eq!(
         actions(&setup_agent(&env.ctx, AgentId::Antigravity, DEFAULT)),
-        vec![Action::Updated]
+        vec![Action::Unchanged, Action::Updated]
     );
     assert!(detect_agent(&env.ctx, AgentId::Antigravity).configured);
 
     let removed = remove_agent(&env.ctx, AgentId::Antigravity, RemoveOptions::default());
-    assert_eq!(actions(&removed), vec![Action::Removed]);
-    let v = read_json(&config);
+    assert_eq!(actions(&removed), vec![Action::Removed, Action::Removed]);
+    let vl = read_json(&legacy);
     assert_eq!(
-        v,
+        vl,
         json!({"mcpServers": {"browser": {"command": "b", "env": {"K": "V"}}}})
     );
+    assert!(read_json(&global)["mcpServers"].get("anvil").is_none());
+    assert!(!env.home().join(".gemini/config/skills/cmake-ninja-debug").exists());
     assert!(!env.home().join(".gemini/antigravity/skills/cmake-ninja-debug").exists());
 }
 
@@ -433,7 +442,7 @@ fn uninstall_mode_keeps_entries_of_other_installations() {
         only_this_install: true,
     };
     let report = remove_agent(&env.ctx, AgentId::Antigravity, opts);
-    assert_eq!(actions(&report), vec![Action::Kept]);
+    assert_eq!(actions(&report), vec![Action::Absent, Action::Kept]);
     assert!(report.skills[0].skipped, "skills belong to the other installation");
     assert!(user_owned_skills.is_file());
     assert!(read_json(&config)["mcpServers"]["anvil"].is_object());
@@ -441,7 +450,7 @@ fn uninstall_mode_keeps_entries_of_other_installations() {
     // Our own entry is removed in the same mode.
     setup_agent(&env.ctx, AgentId::Antigravity, DEFAULT);
     let report = remove_agent(&env.ctx, AgentId::Antigravity, opts);
-    assert_eq!(actions(&report), vec![Action::Removed]);
+    assert_eq!(actions(&report), vec![Action::Removed, Action::Removed]);
     assert!(!user_owned_skills.exists());
 }
 

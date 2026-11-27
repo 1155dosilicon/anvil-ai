@@ -108,6 +108,11 @@ impl AgentPaths {
     pub fn antigravity_dir(&self) -> PathBuf {
         self.home.join(".gemini").join("antigravity")
     }
+
+    /// `~/.gemini/config` (official Antigravity global customization discovery root).
+    pub fn gemini_config_dir(&self) -> PathBuf {
+        self.home.join(".gemini").join("config")
+    }
 }
 
 #[cfg(test)]
