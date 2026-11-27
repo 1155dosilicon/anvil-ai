@@ -64,3 +64,70 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
+
+  release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check that the tag matches the workspace version
+        shell: bash
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p}' Cargo.toml)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+
+      - name: Download the tested binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          chmod +x anvil-linux-x86_64
+          sha256sum anvil-windows-x86_64.exe anvil-linux-x86_64 > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          cat > notes.md <<NOTES
+          Toolchain nativo portátil e offline para agentes de IA: Clang/LLVM, Rust, CMake/Ninja,
+          clangd e rust-analyzer atrás de um único binário multicall e de um servidor MCP.
+
+          ## Downloads
+
+          | Arquivo | Plataforma |
+          |---------|------------|
+          | \`anvil-windows-x86_64.exe\` | Windows x86_64 |
+          | \`anvil-linux-x86_64\` | Linux x86_64 (glibc) |
+          | \`SHA256SUMS\` | SHA-256 dos dois binários |
+
+          Os bundles de toolchain não vão anexados (só o bundle LLVM do Linux passa do
+          limite de 2 GiB por arquivo do GitHub). Monte o pendrive a partir das fontes oficiais:
+
+          \`\`\`sh
+          anvil bundle init-usb --usb <pendrive>/anvil
+          anvil bundle sync --usb <pendrive>/anvil
+          anvil bundle verify --usb <pendrive>/anvil
+          \`\`\`
+
+          Depois rode \`install.ps1\` (Windows) ou \`sh ./install.sh\` (Linux) a partir do pendrive.
+          Detalhes no README.
+          NOTES
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "anvil $GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            dist/anvil-windows-x86_64.exe dist/anvil-linux-x86_64 dist/SHA256SUMS
