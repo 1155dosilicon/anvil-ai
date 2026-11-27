@@ -463,14 +463,14 @@ fn run_smoke_case(opts: &DoctorOptions, case: &SmokeCase, dir: &Path) -> SmokeTe
         return result;
     }
 
-    let env = ToolEnv::for_layout(&opts.layout);
+    let mut env = ToolEnv::for_layout(&opts.layout);
     let mut compile = Command::new(&compiler);
-    compile
-        .current_dir(dir)
-        .args(case.extra_args)
-        .arg(&src)
-        .arg("-o")
-        .arg(&exe);
+    compile.current_dir(dir).args(case.extra_args);
+    if cfg!(windows) && case.language == "rust" && crate::dispatch::has_windows_gnu_self_contained(&opts.layout) {
+        compile.args(["-C", "link-self-contained=yes"]);
+        env.strip_dir_from_path(&opts.layout.toolchain_dir("llvm").join("bin"));
+    }
+    compile.arg(&src).arg("-o").arg(&exe);
     env.apply(&mut compile);
 
     let step = |cmd: &mut Command, what: &str| -> Result<Captured, String> {

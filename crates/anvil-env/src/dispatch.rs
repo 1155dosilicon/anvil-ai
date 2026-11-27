@@ -83,7 +83,20 @@ pub fn prepare_command(
     }
     let mut cmd = Command::new(&real);
     cmd.args(args);
-    ToolEnv::for_layout(layout).apply(&mut cmd);
+    let mut env = ToolEnv::for_layout(layout);
+    // On Windows, `llvm-mingw` ships a Clang wrapper named `x86_64-w64-mingw32-gcc.exe`
+    // that uses compiler-rt instead of libgcc. If `rustc` sees it on PATH while compiling
+    // for `x86_64-pc-windows-gnu`, it disables its own self-contained MinGW linker and fails
+    // looking for `-lgcc_eh`. Removing `llvm/bin` from `rustc`'s PATH (unless targeting
+    // `gnullvm`) lets `rustc` use its bundled self-contained linker automatically.
+    if cfg!(windows)
+        && tool.name == "rustc"
+        && has_windows_gnu_self_contained(layout)
+        && !args.iter().any(|a| a.to_string_lossy().contains("gnullvm"))
+    {
+        env.strip_dir_from_path(&layout.toolchain_dir("llvm").join("bin"));
+    }
+    env.apply(&mut cmd);
     Ok(cmd)
 }
 
@@ -167,7 +180,18 @@ impl ToolEnv {
 
         if cfg!(windows) {
             let clang = layout.toolchain_dir("llvm").join("bin").join(exe_name("clang"));
-            if clang.is_file() {
+            if has_windows_gnu_self_contained(layout) {
+                vars.push((
+                    "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS".to_string(),
+                    OsString::from("-C link-self-contained=yes"),
+                ));
+                if clang.is_file() {
+                    vars.push((
+                        "CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER".to_string(),
+                        clang.into_os_string(),
+                    ));
+                }
+            } else if clang.is_file() {
                 for var in WINDOWS_LINKER_VARS {
                     vars.push((var.to_string(), clang.clone().into_os_string()));
                 }
@@ -185,6 +209,37 @@ impl ToolEnv {
             cmd.env(k, v);
         }
     }
+
+    /// Remove `dir` from the `PATH` entry in this environment (if present).
+    pub fn strip_dir_from_path(&mut self, dir: &Path) {
+        if let Some((_, val)) = self.vars.iter_mut().find(|(k, _)| k == "PATH") {
+            let target = dir.to_string_lossy();
+            let kept: Vec<PathBuf> = std::env::split_paths(val.as_os_str())
+                .filter(|p| {
+                    if cfg!(windows) {
+                        !crate::winpath::entries_equal(&p.to_string_lossy(), &target)
+                    } else {
+                        p != dir
+                    }
+                })
+                .collect();
+            if let Ok(joined) = std::env::join_paths(kept) {
+                *val = joined;
+            }
+        }
+    }
+}
+
+/// Whether the isolated Rust toolchain ships `x86_64-pc-windows-gnu` self-contained MinGW libs.
+pub fn has_windows_gnu_self_contained(layout: &InstallLayout) -> bool {
+    layout
+        .toolchain_dir("rust")
+        .join("lib")
+        .join("rustlib")
+        .join("x86_64-pc-windows-gnu")
+        .join("lib")
+        .join("self-contained")
+        .is_dir()
 }
 
 /// Cargo linker overrides pointing at llvm-mingw's `clang.exe` (Windows only).
