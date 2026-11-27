@@ -600,15 +600,24 @@ fn parse_clang_line(line: &str) -> Option<CompilerDiagnostic> {
         let Some((lhs, rhs)) = line.split_once(&marker) else {
             continue;
         };
-        // lhs is `<file>:<line>:<col>` or `<file>:<line>`. Handle Windows `C:\...` by rsplitn.
-        let mut parts = lhs.rsplitn(3, ':');
-        let last = parts.next()?.trim();
-        let prev = parts.next()?.trim();
-        let (file, line_no, col_no) = match (parts.next(), prev.parse::<u32>(), last.parse::<u32>()) {
-            (Some(f), Ok(l), Ok(c)) => (f, l, Some(c)),
-            (None, _, Ok(l)) => (prev, l, None),
-            _ => continue,
+        // lhs is `<file>:<line>:<col>` or `<file>:<line>`; the file may itself
+        // contain ':' (Windows `C:\...`), so peel numbers off the right only.
+        let Some((rest, last)) = lhs.rsplit_once(':') else {
+            continue;
         };
+        let Ok(last) = last.trim().parse::<u32>() else {
+            continue;
+        };
+        let with_line = rest
+            .rsplit_once(':')
+            .and_then(|(file, l)| Some((file, l.trim().parse::<u32>().ok()?)));
+        let (file, line_no, col_no) = match with_line {
+            Some((file, l)) if !file.is_empty() => (file, l, Some(last)),
+            _ => (rest, last, None),
+        };
+        if file.trim().is_empty() {
+            continue;
+        }
         return Some(CompilerDiagnostic {
             file: Some(file.to_string()),
             line: Some(line_no),
@@ -668,6 +677,17 @@ mod tests {
         assert_eq!(diags[0].level, "error");
         assert_eq!(diags[1].file.as_deref(), Some("/src/app.cpp"));
         assert_eq!(diags[1].level, "warning");
+    }
+
+    #[test]
+    fn parses_clang_lines_without_column() {
+        let sample = "C:\\proj\\main.c:7: error: boom\n/src/a.c:3: warning: hm\nerror: no location\n";
+        let diags = parse_clang_diagnostics(sample);
+        assert_eq!(diags.len(), 2, "{diags:?}");
+        assert_eq!(diags[0].file.as_deref(), Some(r"C:\proj\main.c"));
+        assert_eq!((diags[0].line, diags[0].col), (Some(7), None));
+        assert_eq!(diags[1].file.as_deref(), Some("/src/a.c"));
+        assert_eq!((diags[1].line, diags[1].col), (Some(3), None));
     }
 
     #[test]

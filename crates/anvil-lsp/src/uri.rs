@@ -116,12 +116,14 @@ fn percent_decode(input: &str) -> Option<String> {
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hi = from_hex(bytes[i + 1])?;
-            let lo = from_hex(bytes[i + 2])?;
+        let escape = (bytes[i] == b'%' && i + 2 < bytes.len())
+            .then(|| Some((from_hex(bytes[i + 1])?, from_hex(bytes[i + 2])?)))
+            .flatten();
+        if let Some((hi, lo)) = escape {
             out.push((hi << 4) | lo);
             i += 3;
         } else {
+            // A stray `%` (not followed by two hex digits) is kept literally.
             out.push(bytes[i]);
             i += 1;
         }
@@ -165,6 +167,14 @@ mod tests {
         } else {
             assert_eq!(uri_to_path(&uri), None);
         }
+    }
+
+    #[test]
+    fn stray_percent_is_kept_literally() {
+        assert_eq!(
+            uri_to_path("file:///home/u/100%25/50%done.rs").unwrap(),
+            PathBuf::from("/home/u/100%/50%done.rs")
+        );
     }
 
     #[test]

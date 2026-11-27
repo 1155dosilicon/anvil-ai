@@ -159,15 +159,33 @@ fn remove_tree(root: &Path) -> Vec<PathBuf> {
     }
 
     if cfg!(windows) {
-        let trash = std::env::temp_dir().join(format!("anvil-trash-{}", std::process::id()));
-        let _ = fs::create_dir_all(&trash);
+        // Renames only work within a volume: keep the trash next to `root`
+        // (falling back to %TEMP%), then delete it once this process has exited.
+        let name = format!(
+            ".{}.anvil-trash-{}",
+            root.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            std::process::id()
+        );
+        let trash = root
+            .parent()
+            .map(|p| p.join(&name))
+            .filter(|t| fs::create_dir_all(t).is_ok())
+            .unwrap_or_else(|| {
+                let t = std::env::temp_dir().join(&name);
+                let _ = fs::create_dir_all(&t);
+                t
+            });
         for (n, file) in remaining_files(root).into_iter().enumerate() {
             if fs::remove_file(&file).is_err() {
                 let _ = fs::rename(&file, trash.join(format!("{n}.bin")));
             }
         }
         let _ = fs::remove_dir_all(root);
-        let _ = fs::remove_dir_all(&trash); // best effort; running files stay until reboot/cleanup
+        if fs::remove_dir_all(&trash).is_err() && trash.exists() {
+            schedule_delete_after_exit(&trash);
+        }
     }
 
     if root.exists() {
@@ -181,6 +199,29 @@ fn remove_tree(root: &Path) -> Vec<PathBuf> {
         Vec::new()
     }
 }
+
+/// Delete `dir` from a detached `cmd.exe` a few seconds after this process
+/// exits (running executables, such as this `anvil.exe`, cannot be deleted
+/// while they run but are free once they have exited).
+#[cfg(windows)]
+fn schedule_delete_after_exit(dir: &Path) {
+    use std::os::windows::process::CommandExt;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let cmd = std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into());
+    let script = format!(r#"/D /C "ping -n 4 127.0.0.1 >NUL & rmdir /S /Q "{}"""#, dir.display());
+    let _ = std::process::Command::new(cmd)
+        .raw_arg(script)
+        .current_dir(std::env::temp_dir())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
+        .spawn();
+}
+
+#[cfg(not(windows))]
+fn schedule_delete_after_exit(_dir: &Path) {}
 
 fn remaining_files(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -197,4 +238,23 @@ fn remaining_files(root: &Path) -> Vec<PathBuf> {
     }
     out.sort();
     out
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delayed_delete_removes_directory_after_exit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("trash with space & amp");
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("sub").join("a.bin"), b"x").unwrap();
+        schedule_delete_after_exit(&dir);
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while dir.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        assert!(!dir.exists(), "{} still exists", dir.display());
+    }
 }

@@ -499,20 +499,32 @@ pub fn pack_dir_tar_zst(src_dir: &Path, out: &Path, level: i32) -> Result<Archiv
     if let Some(dir) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(dir).at(dir)?;
     }
-    let file = File::create(out).at(out)?;
-    let encoder = zstd::stream::write::Encoder::new(BufWriter::new(file), level).at(out)?;
-    let mut builder = tar::Builder::new(encoder);
-    builder.mode(tar::HeaderMode::Deterministic);
-    builder.follow_symlinks(false);
-    append_tree(&mut builder, src_dir, Path::new(""))?;
-    let encoder = builder.into_inner().at(out)?;
-    let writer = encoder.finish().at(out)?;
-    writer
-        .into_inner()
-        .map_err(|e| e.into_error())
-        .at(out)?
-        .sync_all()
-        .at(out)?;
+    // Write next to the destination and rename at the end: an interrupted
+    // pack never leaves a truncated archive under the final name.
+    let mut tmp_name = out.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    tmp_name.push(".tmp");
+    let tmp = out.with_file_name(tmp_name);
+    let written = (|| -> Result<()> {
+        let file = File::create(&tmp).at(&tmp)?;
+        let encoder = zstd::stream::write::Encoder::new(BufWriter::new(file), level).at(&tmp)?;
+        let mut builder = tar::Builder::new(encoder);
+        builder.mode(tar::HeaderMode::Deterministic);
+        builder.follow_symlinks(false);
+        append_tree(&mut builder, src_dir, Path::new(""))?;
+        let encoder = builder.into_inner().at(&tmp)?;
+        let writer = encoder.finish().at(&tmp)?;
+        writer
+            .into_inner()
+            .map_err(|e| e.into_error())
+            .at(&tmp)?
+            .sync_all()
+            .at(&tmp)?;
+        rename_with_retry(&tmp, out).at(out)
+    })();
+    if let Err(e) = written {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
 
     Ok(ArchiveInfo {
         sha256: sha256_file(out)?,

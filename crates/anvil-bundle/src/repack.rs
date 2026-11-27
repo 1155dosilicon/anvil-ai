@@ -44,6 +44,22 @@ pub fn stream_repack_to_tar_zst(
         fs::create_dir_all(dir).map_err(io_err(dir))?;
     }
     let tmp_out = out_path.with_extension("tar.zst.tmp");
+    let result = repack_into(inputs, platform, &tmp_out, out_path, level);
+    if result.is_err() {
+        // Never leave a half-written archive behind.
+        let _ = fs::remove_file(&tmp_out);
+    }
+    result
+}
+
+fn repack_into(
+    inputs: &[(PathBuf, UpstreamLayout)],
+    platform: Platform,
+    tmp_out: &Path,
+    out_path: &Path,
+    level: i32,
+) -> Result<RepackResult> {
+    let tmp_out = tmp_out.to_path_buf();
     let file = File::create(&tmp_out).map_err(io_err(&tmp_out))?;
     let encoder = zstd::stream::write::Encoder::new(BufWriter::with_capacity(1 << 20, file), level.clamp(1, 19))
         .map_err(io_err(&tmp_out))?;
@@ -223,6 +239,15 @@ fn append_tar<R: Read, W: io::Write>(
                     .append_link(&mut header, &mapped, &mapped_target)
                     .map_err(io_err(src_path))?;
             }
+            tar::EntryType::GNUSparse => {
+                // Silently dropping it would ship a bundle with a missing file.
+                return Err(BundleError::InvalidRecipe(format!(
+                    "{}: sparse entry '{}' is not supported",
+                    src_path.display(),
+                    raw_path.display()
+                )));
+            }
+            // Devices / FIFOs have no place in a toolchain bundle.
             _ => {}
         }
     }

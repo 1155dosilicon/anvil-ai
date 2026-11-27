@@ -90,6 +90,18 @@ pub fn discover_workspace_root(file: &Path, fallback: Option<&Path>) -> PathBuf 
                     }
                     return best;
                 }
+                // `add_subdirectory()` projects: the root is the topmost directory of
+                // the unbroken chain of `CMakeLists.txt` files above the source.
+                if *marker == "CMakeLists.txt" {
+                    let mut best = ancestor;
+                    for higher in ancestor.ancestors().skip(1) {
+                        if !higher.join(marker).is_file() {
+                            break;
+                        }
+                        best = higher;
+                    }
+                    return best.to_path_buf();
+                }
                 return ancestor.to_path_buf();
             }
         }
@@ -222,5 +234,23 @@ mod tests {
         let file = member.join("lib.rs");
         std::fs::write(&file, "pub fn hi() {}\n").unwrap();
         assert_eq!(discover_workspace_root(&file, None), dir.path());
+    }
+
+    #[test]
+    fn workspace_root_climbs_nested_cmake_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        let lib = root.join("libs").join("core");
+        std::fs::create_dir_all(lib.join("src")).unwrap();
+        std::fs::write(root.join("CMakeLists.txt"), "add_subdirectory(libs)\n").unwrap();
+        std::fs::write(root.join("libs").join("CMakeLists.txt"), "add_subdirectory(core)\n").unwrap();
+        std::fs::write(lib.join("CMakeLists.txt"), "add_library(core src/a.c)\n").unwrap();
+        let file = lib.join("src").join("a.c");
+        std::fs::write(&file, "int a;\n").unwrap();
+        assert_eq!(discover_workspace_root(&file, None), root);
+
+        // A gap in the chain stops the climb.
+        std::fs::remove_file(root.join("libs").join("CMakeLists.txt")).unwrap();
+        assert_eq!(discover_workspace_root(&file, None), lib);
     }
 }

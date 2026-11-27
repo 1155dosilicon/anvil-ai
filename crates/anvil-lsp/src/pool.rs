@@ -59,8 +59,19 @@ impl LspPool {
     /// Evict servers that have been idle longer than `idle_timeout` or have exited.
     pub fn evict_stale(&self) {
         let now = Instant::now();
-        let mut map = self.clients.lock().unwrap_or_else(|e| e.into_inner());
-        map.retain(|_, client| client.is_alive() && now.duration_since(client.last_used()) < self.idle_timeout);
+        let stale: Vec<Arc<LspClient>> = {
+            let mut map = self.clients.lock().unwrap_or_else(|e| e.into_inner());
+            let keys: Vec<_> = map
+                .iter()
+                .filter(|(_, c)| !c.is_alive() || now.duration_since(c.last_used()) >= self.idle_timeout)
+                .map(|(k, _)| k.clone())
+                .collect();
+            keys.iter().filter_map(|k| map.remove(k)).collect()
+        };
+        // Shutting a server down can take a while: never do it while holding the map lock.
+        for client in stale {
+            client.shutdown();
+        }
     }
 
     /// Shut down every active language server cleanly.
@@ -153,8 +164,14 @@ impl LspPool {
         }
         let cmd = self.resolve_server_command(kind, root)?;
         let client = Arc::new(LspClient::start(kind, root.to_path_buf(), &cmd, self.init_timeout)?);
-        let mut map = self.clients.lock().unwrap_or_else(|e| e.into_inner());
-        map.insert(key, Arc::clone(&client));
+        let replaced = {
+            let mut map = self.clients.lock().unwrap_or_else(|e| e.into_inner());
+            map.insert(key, Arc::clone(&client))
+        };
+        // A dead server for the same key: shut it down outside the lock.
+        if let Some(old) = replaced {
+            old.shutdown();
+        }
         Ok(client)
     }
 

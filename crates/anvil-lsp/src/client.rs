@@ -706,8 +706,15 @@ fn parse_one_location(val: &Value) -> Option<LocationItem> {
     let file = uri_to_path(uri)?;
     let line = range.pointer("/start/line").and_then(Value::as_u64)? as u32 + 1;
     let col = range.pointer("/start/character").and_then(Value::as_u64)? as u32 + 1;
-    let end_line = range.pointer("/end/line").and_then(Value::as_u64).unwrap_or(0) as u32 + 1;
-    let end_col = range.pointer("/end/character").and_then(Value::as_u64).unwrap_or(0) as u32 + 1;
+    // A missing end collapses onto the start (never before it).
+    let end_line = range
+        .pointer("/end/line")
+        .and_then(Value::as_u64)
+        .map_or(line, |n| n as u32 + 1);
+    let end_col = range
+        .pointer("/end/character")
+        .and_then(Value::as_u64)
+        .map_or(col, |n| n as u32 + 1);
     Some(LocationItem {
         file,
         line,
