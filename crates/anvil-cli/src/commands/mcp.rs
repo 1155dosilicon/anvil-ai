@@ -1,4 +1,4 @@
-use anvil_core::paths::{absolutize, resolve_install_dir};
+use anvil_core::paths::{absolutize, resolve_existing_install_dir};
 use anvil_core::{EnvMode, InstallLayout};
 use anyhow::{Context, Result};
 
@@ -6,10 +6,10 @@ use crate::cli::McpArgs;
 use crate::output::Outcome;
 
 pub fn run(args: &McpArgs) -> Result<Outcome> {
-    let install_dir = match &args.dest {
+    let install_dir = match args.dest.as_deref() {
         Some(dir) => absolutize(dir)?,
-        None => resolve_install_dir(None).or_else(|_| {
-            // Fallback relative to running binary (`ANVIL_HOME/bin/anvil` -> `ANVIL_HOME`).
+        None => resolve_existing_install_dir(None).or_else(|_| {
+            // Last-resort fallback when neither ANVIL_HOME nor platform defaults exist.
             let exe = std::env::current_exe().context("cannot locate running executable")?;
             Ok::<_, anyhow::Error>(
                 exe.parent()

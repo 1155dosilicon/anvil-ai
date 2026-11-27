@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 
-use anvil_core::paths::resolve_install_dir;
+use anvil_core::paths::resolve_existing_install_dir;
 use anvil_core::InstallLayout;
 use anvil_env::{run_doctor, DoctorOptions, DoctorReport, EnvMode, Status};
 use anyhow::Result;
@@ -9,7 +9,7 @@ use crate::cli::DoctorArgs;
 use crate::output::Outcome;
 
 pub fn run(args: &DoctorArgs) -> Result<Outcome> {
-    let layout = InstallLayout::new(resolve_install_dir(args.dest.as_deref())?);
+    let layout = InstallLayout::new(resolve_existing_install_dir(args.dest.as_deref())?);
     let mut opts = DoctorOptions::new(layout);
     opts.smoke_test = args.smoke_test;
     opts.env_mode = EnvMode::from_process_env();

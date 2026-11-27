@@ -33,6 +33,10 @@ impl Env {
         self.ctx.anvil_exe().unwrap().display().to_string()
     }
 
+    fn install_dir(&self) -> String {
+        self.ctx.install_dir().unwrap().display().to_string()
+    }
+
     fn backups(&self) -> Vec<PathBuf> {
         match fs::read_dir(self.ctx.layout.backups_dir()) {
             Ok(entries) => {
@@ -104,7 +108,10 @@ fn siliconflower_merge_backup_flat_skills_and_clean_removal() {
     assert_eq!(v["model"], "qwen");
     assert_eq!(v["hooks"], json!({"onStart": ["notify"]}));
     assert_eq!(v["mcpServers"]["fs"]["args"], json!(["--root", "/"]));
-    assert_eq!(v["mcpServers"]["anvil"], json!({"command": env.exe(), "args": ["mcp"]}));
+    assert_eq!(
+        v["mcpServers"]["anvil"],
+        json!({"command": env.exe(), "args": ["mcp"], "env": {"ANVIL_HOME": env.install_dir()}})
+    );
     assert!(Path::new(&env.exe()).is_absolute());
 
     // Flat skills: `<name>.md`, no frontmatter, starting with `# <Title>`.
@@ -193,11 +200,14 @@ fn claude_cli_desktop_and_folder_skills() {
     assert_eq!(v["mcpServers"]["gh"]["command"], "gh-mcp");
     assert_eq!(
         v["mcpServers"]["anvil"],
-        json!({"type": "stdio", "command": env.exe(), "args": ["mcp"]})
+        json!({"type": "stdio", "command": env.exe(), "args": ["mcp"], "env": {"ANVIL_HOME": env.install_dir()}})
     );
     let d = read_json(&desktop);
     assert_eq!(d["globalShortcut"], "Ctrl+Space");
-    assert_eq!(d["mcpServers"]["anvil"], json!({"command": env.exe(), "args": ["mcp"]}));
+    assert_eq!(
+        d["mcpServers"]["anvil"],
+        json!({"command": env.exe(), "args": ["mcp"], "env": {"ANVIL_HOME": env.install_dir()}})
+    );
 
     for name in managed_names() {
         let text = fs::read_to_string(env.home().join(format!(".claude/skills/{name}/SKILL.md"))).unwrap();
@@ -282,6 +292,10 @@ fn codex_toml_edit_preserves_comments_and_shared_agents_skills() {
         Some(env.exe().as_str())
     );
     assert_eq!(doc["mcp_servers"]["anvil"]["args"][0].as_str(), Some("mcp"));
+    assert_eq!(
+        doc["mcp_servers"]["anvil"]["env"]["ANVIL_HOME"].as_str(),
+        Some(env.install_dir().as_str())
+    );
     assert_eq!(doc["mcp_servers"]["search"]["command"].as_str(), Some("search-mcp"));
 
     for root in [".codex/skills", ".agents/skills"] {
@@ -332,9 +346,11 @@ fn antigravity_merge_and_removal() {
     assert_eq!(actions(&report), vec![Action::Created, Action::Updated]);
     let vg = read_json(&global);
     assert_eq!(vg["mcpServers"]["anvil"]["command"], env.exe());
+    assert_eq!(vg["mcpServers"]["anvil"]["env"]["ANVIL_HOME"], env.install_dir());
     let vl = read_json(&legacy);
     assert_eq!(vl["mcpServers"]["browser"]["env"]["K"], "V");
     assert_eq!(vl["mcpServers"]["anvil"]["command"], env.exe());
+    assert_eq!(vl["mcpServers"]["anvil"]["env"]["ANVIL_HOME"], env.install_dir());
     assert!(env
         .home()
         .join(".gemini/config/skills/cmake-ninja-debug/SKILL.md")

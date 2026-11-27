@@ -4,11 +4,12 @@
 //! touched: every other key, server, setting and (TOML) comment is preserved.
 //! A document that cannot be parsed is reported as an error and never rewritten.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::Serialize;
 use serde_json::{Map, Value};
-use toml_edit::{Array, DocumentMut, Item, Table};
+use toml_edit::{Array, DocumentMut, InlineTable, Item, Table};
 
 use crate::error::{AgentError, Result};
 
@@ -39,6 +40,9 @@ pub struct McpEntry {
     /// Absolute path of `ANVIL_HOME/bin/anvil(.exe)`.
     pub command: String,
     pub args: Vec<String>,
+    /// Environment variables injected into the MCP server process (e.g. `ANVIL_HOME`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
     /// Emit `"type": "stdio"` (Claude Code CLI).
     pub stdio_type: bool,
 }
@@ -48,8 +52,14 @@ impl McpEntry {
         Self {
             command: command.into(),
             args: vec!["mcp".into()],
+            env: BTreeMap::new(),
             stdio_type: false,
         }
+    }
+
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.insert(key.into(), value.into());
+        self
     }
 
     pub fn with_stdio_type(mut self) -> Self {
@@ -65,6 +75,13 @@ impl McpEntry {
         }
         obj.insert("command".into(), Value::from(self.command.as_str()));
         obj.insert("args".into(), Value::from(self.args.clone()));
+        if !self.env.is_empty() {
+            let mut env_obj = Map::new();
+            for (k, v) in &self.env {
+                env_obj.insert(k.clone(), Value::from(v.as_str()));
+            }
+            obj.insert("env".into(), Value::Object(env_obj));
+        }
         Value::Object(obj)
     }
 }
@@ -110,7 +127,8 @@ fn render_json(map: Map<String, Value>) -> String {
 }
 
 /// Insert or update `mcpServers.anvil`. Extra keys a user added to the anvil
-/// entry (`env`, `disabled`, ...) are kept; `command`/`args`/`type` are enforced.
+/// entry (`disabled`, extra `env` keys, ...) are kept; `command`/`args`/`type`
+/// and anvil's own `env` entries are enforced.
 pub fn json_upsert(path: &Path, text: Option<&str>, entry: &McpEntry) -> Result<Edit> {
     let original = parse_json_root(path, text)?;
     let mut root = original.clone();
@@ -124,6 +142,23 @@ pub fn json_upsert(path: &Path, text: Option<&str>, entry: &McpEntry) -> Result<
     match servers.get_mut(SERVER_KEY) {
         Some(Value::Object(existing)) => {
             for (k, v) in desired.as_object().expect("entry is an object") {
+                if k == "env" {
+                    if let Some(desired_env) = v.as_object() {
+                        match existing.get_mut("env") {
+                            Some(Value::Object(existing_env)) => {
+                                for (ek, ev) in desired_env {
+                                    if existing_env.get(ek) != Some(ev) {
+                                        existing_env.insert(ek.clone(), ev.clone());
+                                    }
+                                }
+                            }
+                            _ => {
+                                existing.insert(k.clone(), v.clone());
+                            }
+                        }
+                        continue;
+                    }
+                }
                 if existing.get(k) != Some(v) {
                     existing.insert(k.clone(), v.clone());
                 }
@@ -174,6 +209,14 @@ fn string_array(items: &[String]) -> Array {
     items.iter().map(String::as_str).collect()
 }
 
+fn inline_env_table(env: &BTreeMap<String, String>) -> InlineTable {
+    let mut tbl = InlineTable::new();
+    for (k, v) in env {
+        tbl.insert(k, v.as_str().into());
+    }
+    tbl
+}
+
 /// Insert or update `[mcp_servers.anvil]`, preserving everything else.
 pub fn toml_upsert(path: &Path, text: Option<&str>, entry: &McpEntry) -> Result<Edit> {
     let original = text.unwrap_or("");
@@ -202,11 +245,28 @@ pub fn toml_upsert(path: &Path, text: Option<&str>, entry: &McpEntry) -> Result<
             if current != Some(entry.args.iter().map(String::as_str).collect()) {
                 existing.insert("args", toml_edit::value(args));
             }
+            if !entry.env.is_empty() {
+                match existing.get_mut("env").and_then(Item::as_table_like_mut) {
+                    Some(existing_env) => {
+                        for (k, v) in &entry.env {
+                            if existing_env.get(k).and_then(Item::as_str) != Some(v.as_str()) {
+                                existing_env.insert(k, toml_edit::value(v.as_str()));
+                            }
+                        }
+                    }
+                    None => {
+                        existing.insert("env", toml_edit::value(inline_env_table(&entry.env)));
+                    }
+                }
+            }
         }
         None => {
             let mut table = Table::new();
             table.insert("command", toml_edit::value(entry.command.as_str()));
             table.insert("args", toml_edit::value(args));
+            if !entry.env.is_empty() {
+                table.insert("env", toml_edit::value(inline_env_table(&entry.env)));
+            }
             servers.insert(SERVER_KEY, Item::Table(table));
         }
     }
@@ -450,10 +510,55 @@ model = "mini"
 
     #[test]
     fn windows_paths_round_trip_in_toml() {
-        let entry = McpEntry::new(EXE);
+        let entry = McpEntry::new(EXE).with_env("ANVIL_HOME", r"C:\Users\Eve\AppData\Local\anvil");
         let text = generic_snippet(ConfigFormat::Toml, &entry);
         assert_eq!(toml_inspect(p(), &text).unwrap().as_deref(), Some(EXE));
+        let doc: DocumentMut = text.parse().unwrap();
+        assert_eq!(
+            doc["mcp_servers"]["anvil"]["env"]["ANVIL_HOME"].as_str(),
+            Some(r"C:\Users\Eve\AppData\Local\anvil")
+        );
         let json = generic_snippet(ConfigFormat::Json, &entry);
         assert_eq!(json_inspect(p(), &json).unwrap().as_deref(), Some(EXE));
+        let v: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            v["mcpServers"]["anvil"]["env"]["ANVIL_HOME"],
+            r"C:\Users\Eve\AppData\Local\anvil"
+        );
+    }
+
+    #[test]
+    fn json_upsert_merges_env_preserving_user_vars() {
+        let text =
+            r#"{"mcpServers":{"anvil":{"command":"/old/anvil","args":["mcp"],"env":{"X":"1","ANVIL_HOME":"/old"}}}}"#;
+        let entry = McpEntry::new("/new/bin/anvil")
+            .with_env("ANVIL_HOME", "/new")
+            .with_stdio_type();
+        let new = json_upsert(p(), Some(text), &entry).unwrap().unwrap();
+        let v: Value = serde_json::from_str(&new).unwrap();
+        assert_eq!(v["mcpServers"]["anvil"]["command"], "/new/bin/anvil");
+        assert_eq!(v["mcpServers"]["anvil"]["env"]["X"], "1");
+        assert_eq!(v["mcpServers"]["anvil"]["env"]["ANVIL_HOME"], "/new");
+        assert_eq!(json_upsert(p(), Some(&new), &entry).unwrap(), None, "idempotent");
+    }
+
+    #[test]
+    fn toml_upsert_merges_env_preserving_user_vars() {
+        let text = "[mcp_servers.anvil]\ncommand = \"/old/anvil\"\nargs = [\"mcp\"]\nenv = { X = \"1\", ANVIL_HOME = \"/old\" }\n";
+        let entry = McpEntry::new("/new/bin/anvil").with_env("ANVIL_HOME", "/new");
+        let new = toml_upsert(p(), Some(text), &entry).unwrap().unwrap();
+        let doc: DocumentMut = new.parse().unwrap();
+        assert_eq!(doc["mcp_servers"]["anvil"]["command"].as_str(), Some("/new/bin/anvil"));
+        assert_eq!(doc["mcp_servers"]["anvil"]["env"]["X"].as_str(), Some("1"));
+        assert_eq!(doc["mcp_servers"]["anvil"]["env"]["ANVIL_HOME"].as_str(), Some("/new"));
+        assert_eq!(toml_upsert(p(), Some(&new), &entry).unwrap(), None, "idempotent");
+
+        // Sub-table syntax `[mcp_servers.anvil.env]` is also merged cleanly.
+        let subtable = "[mcp_servers.anvil]\ncommand = \"/new/bin/anvil\"\nargs = [\"mcp\"]\n\n[mcp_servers.anvil.env]\nFOO = \"bar\"\n";
+        let merged = toml_upsert(p(), Some(subtable), &entry).unwrap().unwrap();
+        let doc: DocumentMut = merged.parse().unwrap();
+        assert_eq!(doc["mcp_servers"]["anvil"]["env"]["FOO"].as_str(), Some("bar"));
+        assert_eq!(doc["mcp_servers"]["anvil"]["env"]["ANVIL_HOME"].as_str(), Some("/new"));
+        assert_eq!(toml_upsert(p(), Some(&merged), &entry).unwrap(), None, "idempotent");
     }
 }

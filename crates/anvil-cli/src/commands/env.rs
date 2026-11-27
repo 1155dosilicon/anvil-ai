@@ -1,4 +1,4 @@
-use anvil_core::paths::resolve_install_dir;
+use anvil_core::paths::resolve_existing_install_dir;
 use anvil_core::InstallLayout;
 use anvil_env::shell::{SessionEnv, Shell};
 use anyhow::Result;
@@ -7,7 +7,7 @@ use crate::cli::EnvArgs;
 use crate::output::Outcome;
 
 pub fn run(args: &EnvArgs) -> Result<Outcome> {
-    let layout = InstallLayout::new(resolve_install_dir(args.dest.as_deref())?);
+    let layout = InstallLayout::new(resolve_existing_install_dir(args.dest.as_deref())?);
     if !layout.state_file().is_file() {
         // stderr only: stdout must stay valid for `eval` / JSON consumers.
         eprintln!(

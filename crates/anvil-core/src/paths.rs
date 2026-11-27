@@ -56,6 +56,36 @@ pub fn resolve_install_dir(dest: Option<&Path>) -> Result<PathBuf> {
     }
 }
 
+/// Resolve the directory of an existing Anvil installation:
+/// 1. `--dest` if explicitly provided;
+/// 2. `ANVIL_HOME` if set and non-empty;
+/// 3. `<current_exe>/../..` if it contains `state.json` (running from `<ANVIL_HOME>/bin/anvil`);
+/// 4. the platform default (`%LOCALAPPDATA%\anvil` / `$XDG_DATA_HOME/anvil` / `~/.local/share/anvil`).
+pub fn resolve_existing_install_dir(dest: Option<&Path>) -> Result<PathBuf> {
+    let exe = std::env::current_exe().ok();
+    resolve_existing_install_dir_with(dest, exe.as_deref(), |key| std::env::var_os(key))
+}
+
+/// Testable variant of [`resolve_existing_install_dir`].
+pub fn resolve_existing_install_dir_with(
+    dest: Option<&Path>,
+    current_exe: Option<&Path>,
+    get: impl Fn(&str) -> Option<OsString>,
+) -> Result<PathBuf> {
+    if let Some(dest) = dest {
+        return absolutize(dest);
+    }
+    if let Some(home) = get(ANVIL_HOME_ENV).filter(|v| !v.is_empty()) {
+        return absolutize(&PathBuf::from(home));
+    }
+    if let Some(candidate) = current_exe.and_then(|exe| exe.parent()).and_then(Path::parent) {
+        if candidate.join(STATE_FILE).is_file() {
+            return absolutize(candidate);
+        }
+    }
+    default_install_dir_with(get).and_then(|p| absolutize(&p))
+}
+
 /// Directory holding `manifest.json` and `bundles/`:
 /// `--from` if given, otherwise the directory of the running executable
 /// (or its parent, if the executable lives in a `bin/`-style subfolder of the USB drive).
@@ -274,5 +304,78 @@ mod tests {
                 .join("bin")
                 .join(format!("cmake{}", std::env::consts::EXE_SUFFIX))
         );
+    }
+
+    #[test]
+    fn existing_install_dir_precedence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let installed = tmp.path().join("custom-anvil");
+        let exe = installed
+            .join("bin")
+            .join(format!("anvil{}", std::env::consts::EXE_SUFFIX));
+        let explicit = tmp.path().join("explicit-dest");
+        let env_home = tmp.path().join("env-home");
+        let local_app = tmp.path().join("local-app");
+        let unix_home = tmp.path().join("unix-home");
+
+        let default_env = || {
+            env(&[
+                ("LOCALAPPDATA", local_app.to_str().unwrap()),
+                ("HOME", unix_home.to_str().unwrap()),
+            ])
+        };
+
+        // Without state.json next to exe/../.., fall back to platform default.
+        let dir = resolve_existing_install_dir_with(None, Some(&exe), default_env()).unwrap();
+        if cfg!(windows) {
+            assert_eq!(dir, absolutize(&local_app.join("anvil")).unwrap());
+        } else {
+            assert_eq!(dir, absolutize(&unix_home.join(".local/share/anvil")).unwrap());
+        }
+
+        // Once state.json exists in exe/../.., exe location wins over platform default.
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(installed.join(STATE_FILE), "{}").unwrap();
+        let dir = resolve_existing_install_dir_with(None, Some(&exe), default_env()).unwrap();
+        assert_eq!(dir, absolutize(&installed).unwrap());
+
+        // Empty ANVIL_HOME is ignored so exe/../.. still wins.
+        let dir = resolve_existing_install_dir_with(
+            None,
+            Some(&exe),
+            env(&[
+                ("ANVIL_HOME", ""),
+                ("LOCALAPPDATA", local_app.to_str().unwrap()),
+                ("HOME", unix_home.to_str().unwrap()),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(dir, absolutize(&installed).unwrap());
+
+        // Non-empty ANVIL_HOME overrides exe/../..
+        let dir = resolve_existing_install_dir_with(
+            None,
+            Some(&exe),
+            env(&[
+                ("ANVIL_HOME", env_home.to_str().unwrap()),
+                ("LOCALAPPDATA", local_app.to_str().unwrap()),
+                ("HOME", unix_home.to_str().unwrap()),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(dir, absolutize(&env_home).unwrap());
+
+        // Explicit --dest overrides both ANVIL_HOME and exe/../..
+        let dir = resolve_existing_install_dir_with(
+            Some(&explicit),
+            Some(&exe),
+            env(&[
+                ("ANVIL_HOME", env_home.to_str().unwrap()),
+                ("LOCALAPPDATA", local_app.to_str().unwrap()),
+                ("HOME", unix_home.to_str().unwrap()),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(dir, absolutize(&explicit).unwrap());
     }
 }

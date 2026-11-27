@@ -7,7 +7,7 @@ use anvil_agents::skills::is_valid_skill_name;
 use anvil_agents::{
     embedded, embedded_skill, install_canonical_skills, parse_agent_list, Selection, SetupOptions, Skill,
 };
-use anvil_core::paths::resolve_install_dir;
+use anvil_core::paths::resolve_existing_install_dir;
 use anvil_core::InstallLayout;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -27,7 +27,7 @@ pub fn run(args: &SkillsArgs) -> Result<Outcome> {
 /// Skills in `ANVIL_HOME/skills/` that are not embedded in this binary.
 /// The install directory is optional here: `skills` must work from the USB drive.
 fn extra_skills(dest: Option<&std::path::Path>) -> Vec<(Skill, std::path::PathBuf)> {
-    let Ok(dir) = resolve_install_dir(dest).map(|d| InstallLayout::new(d).skills_dir()) else {
+    let Ok(dir) = resolve_existing_install_dir(dest).map(|d| InstallLayout::new(d).skills_dir()) else {
         return Vec::new();
     };
     let Ok(entries) = fs::read_dir(&dir) else {
@@ -80,7 +80,7 @@ fn read(args: &SkillsReadArgs) -> Result<Outcome> {
     let (skill, source, path) = match embedded_skill(&args.name) {
         Some(skill) => (skill.clone(), "embedded", None),
         None => {
-            let dir = InstallLayout::new(resolve_install_dir(args.dest.as_deref())?).skills_dir();
+            let dir = InstallLayout::new(resolve_existing_install_dir(args.dest.as_deref())?).skills_dir();
             let path = dir.join(format!("{}.md", args.name));
             let text = match fs::read_to_string(&path) {
                 Ok(text) => text,
