@@ -19,6 +19,11 @@ pub struct Manifest {
     pub anvil_version: String,
     #[serde(default)]
     pub bundles: Vec<BundleSpec>,
+    /// Bundles skipped by [`Manifest::load`] because their platform is not
+    /// supported by this build (e.g. `llvm (linux-x86_64)` on drives written
+    /// by Anvil 0.1). Never serialized: saving the manifest drops them.
+    #[serde(skip)]
+    pub unsupported: Vec<String>,
 }
 
 /// One compressed toolchain bundle.
@@ -58,16 +63,35 @@ impl Manifest {
             schema_version: SCHEMA_VERSION,
             anvil_version: crate::ANVIL_VERSION.to_string(),
             bundles,
+            unsupported: Vec::new(),
         }
     }
 
     /// Read, parse and validate a manifest file.
+    ///
+    /// Bundles for platforms this build does not support are skipped and
+    /// listed in [`Manifest::unsupported`] instead of failing the whole file.
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).at(path)?;
-        let manifest: Manifest = serde_json::from_str(&text).map_err(|source| CoreError::Json {
-            path: path.to_path_buf(),
+        Self::from_json_str(&text).map_err(|e| match e {
+            CoreError::Json { source, .. } => CoreError::Json {
+                path: path.to_path_buf(),
+                source,
+            },
+            other => other,
+        })
+    }
+
+    /// Parse and validate manifest JSON (see [`Manifest::load`]).
+    pub fn from_json_str(text: &str) -> Result<Self> {
+        let json_err = |source| CoreError::Json {
+            path: PathBuf::from(MANIFEST_FILE),
             source,
-        })?;
+        };
+        let mut value: serde_json::Value = serde_json::from_str(text).map_err(json_err)?;
+        let unsupported = take_unsupported_bundles(&mut value);
+        let mut manifest: Manifest = serde_json::from_value(value).map_err(json_err)?;
+        manifest.unsupported = unsupported;
         manifest.validate()?;
         Ok(manifest)
     }
@@ -131,6 +155,23 @@ impl Manifest {
     }
 }
 
+/// Remove bundles whose `platform` is a string this build does not know,
+/// returning `"<id> (<platform>)"` for each one.
+fn take_unsupported_bundles(value: &mut serde_json::Value) -> Vec<String> {
+    let mut skipped = Vec::new();
+    if let Some(bundles) = value.get_mut("bundles").and_then(serde_json::Value::as_array_mut) {
+        bundles.retain(|b| match b.get("platform").and_then(serde_json::Value::as_str) {
+            Some(p) if p.parse::<Platform>().is_err() => {
+                let id = b.get("id").and_then(serde_json::Value::as_str).unwrap_or("?");
+                skipped.push(format!("{id} ({p})"));
+                false
+            }
+            _ => true,
+        });
+    }
+    skipped
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,8 +214,33 @@ mod tests {
     }
 
     #[test]
+    fn skips_bundles_for_unsupported_platforms() {
+        // Drives written by Anvil 0.1 also list Linux bundles.
+        let mut legacy = Manifest::new(vec![bundle("llvm", Platform::WindowsX86_64)]);
+        let mut value = serde_json::to_value(&legacy).unwrap();
+        let mut linux = value["bundles"][0].clone();
+        linux["platform"] = "linux-x86_64".into();
+        linux["archive"] = "bundles/linux-x86_64/llvm.tar.zst".into();
+        value["bundles"].as_array_mut().unwrap().push(linux);
+
+        let m = Manifest::from_json_str(&value.to_string()).unwrap();
+        assert_eq!(m.bundles.len(), 1);
+        assert_eq!(m.bundles[0].platform, Platform::WindowsX86_64);
+        assert_eq!(m.unsupported, vec!["llvm (linux-x86_64)"]);
+        // Saving drops the skipped entries.
+        assert!(!m.to_json_pretty().contains("linux"));
+        legacy.unsupported = m.unsupported.clone();
+        assert_eq!(m, legacy);
+
+        // A non-string platform is still a hard error.
+        let mut bad = serde_json::to_value(Manifest::new(vec![bundle("llvm", Platform::WindowsX86_64)])).unwrap();
+        bad["bundles"][0]["platform"] = 7.into();
+        assert!(Manifest::from_json_str(&bad.to_string()).is_err());
+    }
+
+    #[test]
     fn rejects_invalid_manifests() {
-        let mut m = Manifest::new(vec![bundle("llvm", Platform::LinuxX86_64)]);
+        let mut m = Manifest::new(vec![bundle("llvm", Platform::WindowsX86_64)]);
         m.validate().unwrap();
 
         m.schema_version = 2;
@@ -182,7 +248,7 @@ mod tests {
         m.schema_version = 1;
 
         let mut dup = m.clone();
-        dup.bundles.push(bundle("llvm", Platform::LinuxX86_64));
+        dup.bundles.push(bundle("llvm", Platform::WindowsX86_64));
         assert!(dup.validate().is_err());
 
         let mut traversal = m.clone();
@@ -203,27 +269,26 @@ mod tests {
         let m = Manifest::new(vec![
             bundle("llvm", Platform::WindowsX86_64),
             bundle("rust", Platform::WindowsX86_64),
-            bundle("llvm", Platform::LinuxX86_64),
         ]);
         assert_eq!(m.select(Platform::WindowsX86_64, &[]).unwrap().len(), 2);
         let only = m.select(Platform::WindowsX86_64, &["rust".into()]).unwrap();
         assert_eq!(only.len(), 1);
         assert_eq!(only[0].id, "rust");
         assert!(matches!(
-            m.select(Platform::LinuxX86_64, &["rust".into()]),
+            m.select(Platform::WindowsX86_64, &["build-tools".into()]),
             Err(CoreError::UnknownBundle { .. })
         ));
     }
 
     #[test]
     fn archive_path_is_joined_per_component() {
-        let b = bundle("llvm", Platform::LinuxX86_64);
+        let b = bundle("llvm", Platform::WindowsX86_64);
         let p = b.archive_path(Path::new("usb"));
         assert_eq!(
             p,
             Path::new("usb")
                 .join("bundles")
-                .join("linux-x86_64")
+                .join("windows-x86_64")
                 .join("llvm.tar.zst")
         );
     }

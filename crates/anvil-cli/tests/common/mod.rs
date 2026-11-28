@@ -68,8 +68,13 @@ pub fn dummy_tool() -> &'static Path {
         let src = dir.join(format!("dummy-{hash}-{}.rs", std::process::id()));
         fs::write(&src, DUMMY_SRC).unwrap();
         let staging = dir.join(format!("dummy-{hash}-{}{EXE}", std::process::id()));
-        let status = Command::new(rustc())
-            .args(["--edition", "2021", "-C", "debuginfo=0", "-o"])
+        let mut cmd = Command::new(rustc());
+        cmd.args(["--edition", "2021", "-C", "debuginfo=0"]);
+        if cfg!(target_env = "gnu") {
+            cmd.args(["-C", "link-self-contained=yes"]);
+        }
+        let status = cmd
+            .arg("-o")
             .arg(&staging)
             .arg(&src)
             .status()
@@ -88,7 +93,7 @@ pub fn install_dummy(path: &Path) {
     fs::copy(dummy_tool(), path).unwrap();
 }
 
-/// `anvil` command with an isolated user environment (never the real registry / $HOME).
+/// `anvil` command with an isolated user environment (never the real registry / %USERPROFILE%).
 pub fn anvil(sandbox: &Path) -> Command {
     let mut cmd = Command::new(anvil_bin());
     cmd.env("ANVIL_ENV_SANDBOX", sandbox)
@@ -146,33 +151,16 @@ pub fn fake_usb(tmp: &Path) -> FakeUsb {
     let rel = format!("bundles/{platform}/build-tools.tar.zst");
     let info = pack_dir_tar_zst(&staging, &root.join(&rel), 3).unwrap();
 
-    let other = match platform {
-        Platform::WindowsX86_64 => Platform::LinuxX86_64,
-        Platform::LinuxX86_64 => Platform::WindowsX86_64,
-    };
-    let manifest = Manifest::new(vec![
-        BundleSpec {
-            id: "build-tools".into(),
-            platform,
-            archive: rel,
-            sha256: info.sha256,
-            size_bytes: info.size_bytes,
-            target_subdir: "toolchains/build-tools".into(),
-            version: "3.31.0".into(),
-            tools: vec!["cmake".into(), "ninja".into(), "gdb".into()],
-        },
-        // Present in the manifest but for the other OS: must be ignored.
-        BundleSpec {
-            id: "llvm".into(),
-            platform: other,
-            archive: format!("bundles/{other}/llvm.tar.zst"),
-            sha256: "0".repeat(64),
-            size_bytes: 1,
-            target_subdir: "toolchains/llvm".into(),
-            version: "20.1.0".into(),
-            tools: vec!["clang".into()],
-        },
-    ]);
+    let manifest = Manifest::new(vec![BundleSpec {
+        id: "build-tools".into(),
+        platform,
+        archive: rel,
+        sha256: info.sha256,
+        size_bytes: info.size_bytes,
+        target_subdir: "toolchains/build-tools".into(),
+        version: "3.31.0".into(),
+        tools: vec!["cmake".into(), "ninja".into(), "ctest".into()],
+    }]);
     write_manifest(&root, &manifest);
     FakeUsb { root, manifest }
 }

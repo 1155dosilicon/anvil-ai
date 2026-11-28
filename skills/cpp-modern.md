@@ -1,26 +1,42 @@
 ---
 name: cpp-modern
-title: Modern C++ (C++20/23) with Clang
-description: Write and diagnose modern C++20/23 with Clang and libc++ - RAII, smart pointers, std::span, ranges, clang-format, clang-tidy and clangd diagnostics.
+title: Modern C++ (C++20/23) with Clang on Windows
+description: Write and diagnose modern C++20/23 on Windows x86_64 with Clang and libc++ - standalone static linking, RAII, smart pointers, std::span, ranges, clang-format, clang-tidy and clangd diagnostics.
 ---
 
-## Compile
+## Compile (standalone Windows `.exe`)
 
-```sh
-clang++ -std=c++20 -stdlib=libc++ -Wall -Wextra -Wpedantic -Werror -g main.cpp -o main
-clang++ -std=c++23 -stdlib=libc++ -O2 -DNDEBUG main.cpp -o main
-clang++ -std=c++20 -stdlib=libc++ -g -O1 -fsanitize=address,undefined main.cpp -o main
+Anvil ships `llvm-mingw` (`clang++` + `libc++` + `ld.lld`). Because
+`ANVIL_HOME\toolchains\llvm\bin` is **not** on the user `PATH`, a C++ binary
+linked dynamically depends on `libc++.dll` and `libunwind.dll` and will fail
+outside Anvil with `0xC0000135` (`STATUS_DLL_NOT_FOUND`).
+
+**Always pass `-static` when building standalone C++ executables on Windows:**
+
+```powershell
+clang++ -std=c++20 -static -Wall -Wextra -Wpedantic -Werror -g main.cpp -o main.exe
+clang++ -std=c++23 -static -O2 -DNDEBUG main.cpp -o main.exe
 ```
 
-Anvil's Clang defaults to libc++ (llvm-mingw on Windows); passing
-`-stdlib=libc++` explicitly is harmless and keeps Linux builds consistent.
-Add `.exe` to `-o` on Windows. For more than one file use CMake
-(`cmake-ninja-debug` skill).
+- The MCP tool `cc_build` passes `-static` **automatically** for single-file
+  C++ builds unless `-fsanitize=`, `-shared`, `-c` or `static_link: false` is
+  specified.
+- **Exception — sanitizers & DLLs:** do **not** pass `-static` with
+  `-fsanitize=address` (ASan requires `libclang_rt.asan_dynamic-x86_64.dll`) or
+  when building shared libraries (`-shared`):
+
+```powershell
+clang++ -std=c++20 -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined main.cpp -o main.exe
+# Run with llvm\bin on PATH (or via lldb) during sanitizer testing:
+$env:PATH = "$env:ANVIL_HOME\toolchains\llvm\bin;$env:PATH"; .\main.exe
+```
+
+For more than one source file, use CMake (`cmake-ninja-debug` skill).
 
 ## Core rules
 
-- **RAII**: every resource (memory, file, lock, socket) is owned by an object
-  whose destructor releases it. No naked `new`/`delete`.
+- **RAII**: every resource (memory, file, handle, lock, socket) is owned by an
+  object whose destructor releases it. No naked `new`/`delete`.
 - Ownership: `std::unique_ptr<T>` (default, `std::make_unique`),
   `std::shared_ptr<T>` only for real shared ownership; raw `T*`/`T&` = non-owning.
 - Views: take `std::span<const T>` for contiguous ranges and `std::string_view`
@@ -55,10 +71,10 @@ struct Buffer {
 
 ## Format, lint, diagnose
 
-```sh
-clang-format -i src/*.cpp include/*.hpp
-clang-tidy -p build src/main.cpp                 # uses build/compile_commands.json
-clang-tidy src/main.cpp -- -std=c++20 -Iinclude  # without a build system
+```powershell
+clang-format -i src\*.cpp include\*.hpp
+clang-tidy -p build src\main.cpp                 # uses build\compile_commands.json
+clang-tidy src\main.cpp -- -std=c++20 -Iinclude  # without a build system
 ```
 
 Minimal `.clang-tidy`:
@@ -84,5 +100,5 @@ include path is missing from the compile command - fix CMake, not the code.
 
 ## Debug
 
-`lldb ./main` -> `b file.cpp:42`, `r`, `bt`, `fr v`, `p obj.size()`.
+`lldb .\main.exe` -> `b file.cpp:42`, `r`, `bt`, `fr v`, `p obj.size()`.
 libc++ containers are pretty-printed by lldb.

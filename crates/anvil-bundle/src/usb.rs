@@ -7,7 +7,7 @@ use std::process::Command;
 use anvil_agents::skills::embedded as embedded_skills;
 use anvil_agents::templates::USB_TEMPLATES;
 use anvil_core::hash::sha256_file;
-use anvil_core::{pack_dir_tar_zst, BundleSpec, Manifest, Platform, ANVIL_VERSION, MANIFEST_FILE, SCHEMA_VERSION};
+use anvil_core::{pack_dir_tar_zst, BundleSpec, Manifest, Platform, ANVIL_VERSION, MANIFEST_FILE};
 use anvil_env::MANAGED_TOOLS;
 use serde::Serialize;
 
@@ -28,30 +28,84 @@ pub struct InitUsbReport {
     pub templates_written: Vec<String>,
     pub skills_written: Vec<String>,
     pub binaries_copied: Vec<String>,
+    /// Leftovers of the Linux support dropped after Anvil 0.1 that were removed.
+    pub removed_legacy: Vec<String>,
     pub manifest_path: PathBuf,
 }
 
-/// Populate the USB drive root with templates (`AGENTS.md`, `START_HERE.md`,
-/// `install.ps1`, `install.sh`), canonical `skills/*.md`, platform binaries
-/// (optional), and an initial `manifest.json` if absent.
-pub fn init_usb(usb_dir: &Path, win_exe: Option<&Path>, linux_bin: Option<&Path>) -> Result<InitUsbReport> {
-    fs::create_dir_all(usb_dir).map_err(io_err(usb_dir))?;
-    for plat in [Platform::WindowsX86_64, Platform::LinuxX86_64] {
-        let dir = usb_dir.join("bundles").join(plat.as_str());
-        fs::create_dir_all(&dir).map_err(io_err(&dir))?;
+/// Root files written by Anvil 0.1 for Linux hosts.
+const LEGACY_FILES: &[&str] = &["install.sh"];
+/// Bundle directories of platforms this build no longer supports.
+const LEGACY_PLATFORM_DIRS: &[&str] = &["linux-x86_64"];
+
+fn is_elf(path: &Path) -> bool {
+    use std::io::Read;
+    let mut magic = [0u8; 4];
+    fs::File::open(path)
+        .and_then(|mut f| f.read_exact(&mut magic))
+        .is_ok_and(|()| &magic == b"\x7fELF")
+}
+
+/// Leftovers of the dropped Linux support present on `usb_dir` (relative names).
+pub fn legacy_leftovers(usb_dir: &Path) -> Vec<String> {
+    let mut found: Vec<String> = LEGACY_FILES
+        .iter()
+        .filter(|f| usb_dir.join(f).is_file())
+        .map(|f| f.to_string())
+        .collect();
+    let linux_bin = usb_dir.join("anvil");
+    if linux_bin.is_file() && is_elf(&linux_bin) {
+        found.push("anvil".into());
     }
+    for dir in LEGACY_PLATFORM_DIRS {
+        if usb_dir.join("bundles").join(dir).is_dir() {
+            found.push(format!("bundles/{dir}/"));
+        }
+    }
+    found
+}
+
+/// Remove [`legacy_leftovers`] and drop unsupported bundles from `manifest.json`.
+fn prune_legacy(usb_dir: &Path) -> Result<Vec<String>> {
+    let mut removed = Vec::new();
+    for rel in legacy_leftovers(usb_dir) {
+        let path = usb_dir.join(rel.trim_end_matches('/'));
+        if rel.ends_with('/') {
+            fs::remove_dir_all(&path).map_err(io_err(&path))?;
+        } else {
+            fs::remove_file(&path).map_err(io_err(&path))?;
+        }
+        removed.push(rel);
+    }
+    let manifest_path = usb_dir.join(MANIFEST_FILE);
+    if manifest_path.is_file() {
+        // An unreadable manifest is left alone: `verify` reports it.
+        if let Ok(mut manifest) = Manifest::load(&manifest_path) {
+            if !manifest.unsupported.is_empty() {
+                removed.extend(manifest.unsupported.iter().map(|b| format!("{MANIFEST_FILE}: {b}")));
+                manifest.anvil_version = ANVIL_VERSION.to_string();
+                save_manifest(&manifest_path, &manifest)?;
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// Populate the USB drive root with templates (`AGENTS.md`, `START_HERE.md`,
+/// `install.ps1`), canonical `skills/*.md`, `anvil.exe` (optional),
+/// and an initial `manifest.json` if absent. Leftovers of the Linux support
+/// of Anvil 0.1 (`install.sh`, the ELF `anvil`, `bundles/linux-x86_64/` and
+/// their manifest entries) are removed.
+pub fn init_usb(usb_dir: &Path, win_exe: Option<&Path>) -> Result<InitUsbReport> {
+    fs::create_dir_all(usb_dir).map_err(io_err(usb_dir))?;
+    let removed_legacy = prune_legacy(usb_dir)?;
+    let bundles_dir = usb_dir.join("bundles").join(Platform::WindowsX86_64.as_str());
+    fs::create_dir_all(&bundles_dir).map_err(io_err(&bundles_dir))?;
 
     let mut templates_written = Vec::new();
     for tpl in USB_TEMPLATES {
         let dst = usb_dir.join(tpl.file_name);
         fs::write(&dst, tpl.contents.as_bytes()).map_err(io_err(&dst))?;
-        #[cfg(unix)]
-        if tpl.executable {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&dst).map_err(io_err(&dst))?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&dst, perms).map_err(io_err(&dst))?;
-        }
         templates_written.push(tpl.file_name.to_string());
     }
 
@@ -71,27 +125,10 @@ pub fn init_usb(usb_dir: &Path, win_exe: Option<&Path>, linux_bin: Option<&Path>
         fs::copy(src, &dst).map_err(io_err(&dst))?;
         binaries_copied.push("anvil.exe".into());
     }
-    if let Some(src) = linux_bin {
-        let dst = usb_dir.join("anvil");
-        fs::copy(src, &dst).map_err(io_err(&dst))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&dst).map_err(io_err(&dst))?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&dst, perms).map_err(io_err(&dst))?;
-        }
-        binaries_copied.push("anvil".into());
-    }
 
     let manifest_path = usb_dir.join(MANIFEST_FILE);
     if !manifest_path.is_file() {
-        let empty = Manifest {
-            schema_version: SCHEMA_VERSION,
-            anvil_version: ANVIL_VERSION.to_string(),
-            bundles: Vec::new(),
-        };
-        save_manifest(&manifest_path, &empty)?;
+        save_manifest(&manifest_path, &Manifest::new(Vec::new()))?;
     }
 
     Ok(InitUsbReport {
@@ -99,6 +136,7 @@ pub fn init_usb(usb_dir: &Path, win_exe: Option<&Path>, linux_bin: Option<&Path>
         templates_written,
         skills_written,
         binaries_copied,
+        removed_legacy,
         manifest_path,
     })
 }
@@ -151,11 +189,7 @@ pub fn pack_bundle(req: &PackRequest<'_>) -> Result<PackReport> {
     let mut manifest = if manifest_path.is_file() {
         Manifest::load(&manifest_path)?
     } else {
-        Manifest {
-            schema_version: SCHEMA_VERSION,
-            anvil_version: ANVIL_VERSION.to_string(),
-            bundles: Vec::new(),
-        }
+        Manifest::new(Vec::new())
     };
     manifest.anvil_version = ANVIL_VERSION.to_string();
 
@@ -194,10 +228,7 @@ pub fn pack_bundle(req: &PackRequest<'_>) -> Result<PackReport> {
 }
 
 fn detect_tools_in_source(source_dir: &Path, platform: Platform) -> Vec<String> {
-    let suffix = match platform {
-        Platform::WindowsX86_64 => ".exe",
-        Platform::LinuxX86_64 => "",
-    };
+    let suffix = platform.exe_suffix();
     let bin_dir = source_dir.join("bin");
     let mut found = Vec::new();
     for tool in MANAGED_TOOLS {
@@ -233,6 +264,8 @@ pub struct VerifyUsbReport {
     pub bundles: Vec<BundleVerifyItem>,
     pub missing_templates: Vec<String>,
     pub missing_binaries: Vec<String>,
+    /// Non-fatal findings (e.g. leftovers of the dropped Linux support).
+    pub warnings: Vec<String>,
     pub errors: Vec<String>,
 }
 
@@ -311,8 +344,22 @@ pub fn verify_usb(usb_dir: &Path) -> Result<VerifyUsbReport> {
     if manifest.bundles.iter().any(|b| b.platform == Platform::WindowsX86_64) && !usb_dir.join("anvil.exe").is_file() {
         missing_binaries.push("anvil.exe".into());
     }
-    if manifest.bundles.iter().any(|b| b.platform == Platform::LinuxX86_64) && !usb_dir.join("anvil").is_file() {
-        missing_binaries.push("anvil".into());
+
+    let mut warnings: Vec<String> = manifest
+        .unsupported
+        .iter()
+        .map(|b| format!("{MANIFEST_FILE} lists unsupported bundle {b} (ignored)"))
+        .collect();
+    warnings.extend(
+        legacy_leftovers(usb_dir)
+            .into_iter()
+            .map(|rel| format!("legacy Linux leftover '{rel}'")),
+    );
+    if !warnings.is_empty() {
+        warnings.push(format!(
+            "run `anvil.exe bundle init-usb --usb {}` to clean up",
+            usb_dir.display()
+        ));
     }
 
     Ok(VerifyUsbReport {
@@ -323,6 +370,7 @@ pub fn verify_usb(usb_dir: &Path) -> Result<VerifyUsbReport> {
         bundles,
         missing_templates,
         missing_binaries,
+        warnings,
         errors,
     })
 }
@@ -385,7 +433,7 @@ pub fn sync_usb(book: &RecipeBook, opts: &SyncOptions) -> Result<SyncReport> {
         });
     }
 
-    init_usb(&opts.usb_dir, None, None)?;
+    init_usb(&opts.usb_dir, None)?;
     fs::create_dir_all(&opts.cache_dir).map_err(io_err(&opts.cache_dir))?;
 
     let mut items = Vec::new();
@@ -440,11 +488,7 @@ fn sync_one_bundle(recipe: &BundleRecipe, opts: &SyncOptions) -> Result<PackRepo
     let mut manifest = if manifest_path.is_file() {
         Manifest::load(&manifest_path)?
     } else {
-        Manifest {
-            schema_version: SCHEMA_VERSION,
-            anvil_version: ANVIL_VERSION.to_string(),
-            bundles: Vec::new(),
-        }
+        Manifest::new(Vec::new())
     };
     manifest.anvil_version = ANVIL_VERSION.to_string();
 
@@ -539,10 +583,10 @@ mod tests {
         let fake_exe = tmp.path().join("anvil-bin");
         fs::write(&fake_exe, b"fake-binary").unwrap();
 
-        let init = init_usb(&usb, Some(&fake_exe), Some(&fake_exe)).unwrap();
-        assert_eq!(init.templates_written.len(), 4);
+        let init = init_usb(&usb, Some(&fake_exe)).unwrap();
+        assert_eq!(init.templates_written.len(), 3);
         assert_eq!(init.skills_written.len(), 5);
-        assert_eq!(init.binaries_copied.len(), 2);
+        assert_eq!(init.binaries_copied, vec!["anvil.exe"]);
         assert!(usb.join("AGENTS.md").is_file());
         assert!(usb.join("skills").join("rust-systems.md").is_file());
 
@@ -581,6 +625,72 @@ mod tests {
         assert!(!bad.errors.is_empty());
     }
 
+    /// A drive written by Anvil 0.1 (Windows + Linux) stays usable and is cleaned by `init-usb`.
+    #[test]
+    fn legacy_linux_drive_is_readable_and_pruned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let usb = tmp.path().join("usb");
+        init_usb(&usb, None).unwrap();
+        let src = tmp.path().join("src");
+        fs::create_dir_all(src.join("bin")).unwrap();
+        fs::write(src.join("bin").join("cmake.exe"), b"cmake-bin").unwrap();
+        pack_bundle(&PackRequest {
+            usb_dir: &usb,
+            platform: Platform::WindowsX86_64,
+            id: "build-tools",
+            version: "1",
+            source_dir: &src,
+            target_subdir: None,
+            archive_name: None,
+            level: 1,
+        })
+        .unwrap();
+
+        // Simulate the 0.1 layout: Linux manifest entry, bundles, install.sh and ELF binary.
+        let manifest_path = usb.join(MANIFEST_FILE);
+        let mut value: serde_json::Value = serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        let mut linux = value["bundles"][0].clone();
+        linux["platform"] = "linux-x86_64".into();
+        linux["archive"] = "bundles/linux-x86_64/build-tools.tar.zst".into();
+        value["bundles"].as_array_mut().unwrap().push(linux);
+        fs::write(&manifest_path, value.to_string()).unwrap();
+        fs::create_dir_all(usb.join("bundles/linux-x86_64")).unwrap();
+        fs::write(usb.join("bundles/linux-x86_64/build-tools.tar.zst"), b"x").unwrap();
+        fs::write(usb.join("install.sh"), b"#!/bin/sh\n").unwrap();
+        fs::write(usb.join("anvil"), b"\x7fELF\x02\x01").unwrap();
+
+        let verified = verify_usb(&usb).unwrap();
+        assert!(verified.ok, "{verified:?}");
+        assert_eq!(verified.bundles.len(), 1);
+        assert!(verified
+            .warnings
+            .iter()
+            .any(|w| w.contains("build-tools (linux-x86_64)")));
+        assert!(verified.warnings.iter().any(|w| w.contains("install.sh")));
+        assert!(verified.warnings.iter().any(|w| w.contains("bundles/linux-x86_64/")));
+
+        let init = init_usb(&usb, None).unwrap();
+        assert_eq!(
+            init.removed_legacy,
+            vec![
+                "install.sh",
+                "anvil",
+                "bundles/linux-x86_64/",
+                "manifest.json: build-tools (linux-x86_64)"
+            ]
+        );
+        assert!(!usb.join("install.sh").exists() && !usb.join("anvil").exists());
+        assert!(!usb.join("bundles/linux-x86_64").exists());
+        assert!(!fs::read_to_string(&manifest_path).unwrap().contains("linux"));
+        let clean = verify_usb(&usb).unwrap();
+        assert!(clean.ok && clean.warnings.is_empty(), "{clean:?}");
+
+        // A non-ELF file named `anvil` is not ours to delete.
+        fs::write(usb.join("anvil"), b"notes").unwrap();
+        assert!(init_usb(&usb, None).unwrap().removed_legacy.is_empty());
+        assert!(usb.join("anvil").is_file());
+    }
+
     #[test]
     fn sync_dry_run_plans_requested_targets() {
         let tmp = tempfile::tempdir().unwrap();
@@ -589,7 +699,7 @@ mod tests {
             &book,
             &SyncOptions {
                 usb_dir: tmp.path().join("usb"),
-                targets: vec![Platform::WindowsX86_64, Platform::LinuxX86_64],
+                targets: vec![Platform::WindowsX86_64],
                 only: vec!["rust".into()],
                 cache_dir: tmp.path().join("cache"),
                 level: 10,
@@ -598,7 +708,7 @@ mod tests {
         )
         .unwrap();
         assert!(report.ok && report.dry_run);
-        assert_eq!(report.items.len(), 2);
+        assert_eq!(report.items.len(), 1);
         assert!(report.items.iter().all(|i| i.id == "rust" && i.status == "planned"));
     }
 }

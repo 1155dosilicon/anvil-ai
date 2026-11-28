@@ -85,7 +85,7 @@ fn full_usb_build_install_and_live_mcp_stdio_round_trip() {
             "--usb",
             &usb.display().to_string(),
             "--targets",
-            "windows-x86_64,linux-x86_64",
+            "windows-x86_64",
             "--dry-run",
             "--json",
         ])
@@ -93,7 +93,7 @@ fn full_usb_build_install_and_live_mcp_stdio_round_trip() {
         .unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(v["report"]["items"].as_array().unwrap().len(), 6);
+    assert_eq!(v["report"]["items"].as_array().unwrap().len(), 3);
 
     // 5. Install from the newly built USB into the SSD (sandboxed env & agent configs).
     let out = Command::new(anvil_bin())

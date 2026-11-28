@@ -419,11 +419,7 @@ fn rust_analyzer_waits_for_flycheck_and_normalizes_reference_drive_letter() {
     // Bug D: lowercase Windows drive URI (`file:///c:/...`) in references normalizes to uppercase `C:`.
     let refs = pool.references(&file, 1, 4, true).unwrap();
     assert_eq!(refs.len(), 1);
-    if cfg!(windows) {
-        assert_eq!(refs[0].file, PathBuf::from(r"C:\Users\demo\src\main.rs"));
-    } else {
-        assert_eq!(refs[0].file, PathBuf::from("C:/Users/demo/src/main.rs"));
-    }
+    assert_eq!(refs[0].file, PathBuf::from(r"C:\Users\demo\src\main.rs"));
 
     // Fixing file on disk triggers didChange + didSave -> flycheck re-runs and clears diagnostics.
     std::fs::write(
@@ -488,15 +484,13 @@ fn real_rust_analyzer_reports_unused_variable_diagnostic() {
     // Bug D: real rust-analyzer references on Windows must have an uppercase drive letter.
     let refs = pool.references(&file, 1, 4, true).unwrap();
     assert!(!refs.is_empty(), "expected references to `add`");
-    if cfg!(windows) {
-        for loc in &refs {
-            let s = loc.file.to_string_lossy();
-            let bytes = s.as_bytes();
-            assert!(
-                bytes.len() >= 2 && bytes[0].is_ascii_uppercase() && bytes[1] == b':',
-                "expected uppercase Windows drive letter in reference path, got: {s}"
-            );
-        }
+    for loc in &refs {
+        let s = loc.file.to_string_lossy();
+        let bytes = s.as_bytes();
+        assert!(
+            bytes.len() >= 2 && bytes[0].is_ascii_uppercase() && bytes[1] == b':',
+            "expected uppercase Windows drive letter in reference path, got: {s}"
+        );
     }
 
     // Editing on disk + calling diagnostics again triggers didSave -> flycheck clears the warning.

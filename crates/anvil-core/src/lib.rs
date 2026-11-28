@@ -4,9 +4,12 @@
 //! * [`paths`] – install directory / source root resolution and the on-disk layout.
 //! * [`manifest`] – the `manifest.json` shipped next to the bundles on the USB drive.
 //! * [`state`] – the `state.json` written into the install directory.
-//! * [`envmode`] – real vs. sandboxed user environment (registry, `$HOME`, agent configs).
+//! * [`envmode`] – real vs. sandboxed user environment (registry, `%USERPROFILE%`, agent configs).
 //! * [`archive`] – single-pass streaming `.tar.zst` extraction with SHA-256 verification.
 //! * [`hash`] / [`progress`] – helpers used by the extractor.
+
+#[cfg(not(all(windows, target_arch = "x86_64")))]
+compile_error!("Anvil supports only Windows x86_64 (build with --target x86_64-pc-windows-gnu or -msvc)");
 
 pub mod archive;
 pub mod envmode;

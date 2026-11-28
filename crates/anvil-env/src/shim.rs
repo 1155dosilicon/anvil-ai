@@ -1,9 +1,8 @@
-//! Multicall shims in `ANVIL_HOME/bin`.
+//! Multicall shims in `ANVIL_HOME\bin`.
 //!
-//! `bin/anvil(.exe)` is a copy of the running binary; every tool shim points to it:
-//! * Unix: relative symlink `bin/<tool> -> anvil`;
-//! * Windows: NTFS hard link `bin/<tool>.exe` ⇔ `bin/anvil.exe` (no extra space),
-//!   falling back to a plain copy on filesystems without hard links (FAT/exFAT).
+//! `bin\anvil.exe` is a copy of the running binary; every tool shim is an NTFS
+//! hard link `bin\<tool>.exe` ⇔ `bin\anvil.exe` (no extra space), falling back
+//! to a plain copy on filesystems without hard links (FAT/exFAT).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,12 +12,11 @@ use anvil_core::InstallLayout;
 use serde::Serialize;
 
 use crate::error::Result;
-use crate::tools::{find_real_tool, managed_tool, same_file, MANAGED_TOOLS};
+use crate::tools::{find_real_tool, managed_tool, same_file, MANAGED_TOOLS, RETIRED_TOOLS};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ShimKind {
-    Symlink,
     HardLink,
     Copy,
 }
@@ -94,14 +92,18 @@ pub fn install_shims(layout: &InstallLayout, source_exe: &Path, tools: &[&str]) 
         });
     }
 
-    for tool in MANAGED_TOOLS {
-        if report.created.iter().any(|c| c.tool == tool.name) {
+    for name in MANAGED_TOOLS
+        .iter()
+        .map(|t| t.name)
+        .chain(RETIRED_TOOLS.iter().copied())
+    {
+        if report.created.iter().any(|c| c.tool == name) {
             continue;
         }
-        let path = layout.shim_path(tool.name);
+        let path = layout.shim_path(name);
         if fs::symlink_metadata(&path).is_ok() {
             remove_or_set_aside(&path)?;
-            report.removed.push(tool.name.to_string());
+            report.removed.push(name.to_string());
         }
     }
     Ok(report)
@@ -110,7 +112,12 @@ pub fn install_shims(layout: &InstallLayout, source_exe: &Path, tools: &[&str]) 
 /// Remove every managed shim and `bin/anvil(.exe)`. Returns the removed names.
 pub fn remove_shims(layout: &InstallLayout) -> Result<Vec<String>> {
     let mut removed = Vec::new();
-    for name in MANAGED_TOOLS.iter().map(|t| t.name).chain(["anvil"]) {
+    for name in MANAGED_TOOLS
+        .iter()
+        .map(|t| t.name)
+        .chain(RETIRED_TOOLS.iter().copied())
+        .chain(["anvil"])
+    {
         let path = layout.shim_path(name);
         if fs::symlink_metadata(&path).is_ok() {
             fs::remove_file(&path).at(&path)?;
@@ -134,9 +141,7 @@ fn install_binary(source: &Path, dest: &Path) -> Result<()> {
             // A previous copy is still running: pick a unique name.
             old = dest.with_extension(format!("old-{}", std::process::id()));
         }
-        if cfg!(windows) {
-            fs::rename(dest, &old).at(dest)?;
-        }
+        fs::rename(dest, &old).at(dest)?;
         fs::rename(&staging, dest).at(dest)?;
         let _ = fs::remove_file(&old);
     } else {
@@ -165,7 +170,7 @@ fn remove_or_set_aside(path: &Path) -> Result<Option<PathBuf>> {
     }
     match fs::remove_file(path) {
         Ok(()) => Ok(None),
-        Err(e) if cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied => {
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             let mut aside = aside_path(path, false);
             if fs::symlink_metadata(&aside).is_ok() && fs::remove_file(&aside).is_err() {
                 // An older set-aside copy is itself still running.
@@ -187,24 +192,11 @@ fn link_shim(anvil: &Path, shim: &Path) -> Result<ShimKind> {
     cleanup_set_aside(shim);
     remove_or_set_aside(shim)?;
 
-    #[cfg(unix)]
-    {
-        let target = anvil
-            .file_name()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| anvil.to_path_buf());
-        std::os::unix::fs::symlink(&target, shim).at(shim)?;
-        Ok(ShimKind::Symlink)
+    if fs::hard_link(anvil, shim).is_ok() {
+        return Ok(ShimKind::HardLink);
     }
-
-    #[cfg(not(unix))]
-    {
-        if fs::hard_link(anvil, shim).is_ok() {
-            return Ok(ShimKind::HardLink);
-        }
-        fs::copy(anvil, shim).at(shim)?;
-        Ok(ShimKind::Copy)
-    }
+    fs::copy(anvil, shim).at(shim)?;
+    Ok(ShimKind::Copy)
 }
 
 #[cfg(test)]
@@ -236,8 +228,11 @@ mod tests {
                 .join(format!("ninja{exe}")),
         );
 
-        // A stale shim from a previous install whose toolchain is gone.
+        // A stale shim from a previous install whose toolchain is gone, and
+        // shims of tools retired since Anvil 0.1.
         touch(&layout.shim_path("clang"));
+        touch(&layout.shim_path("lld"));
+        touch(&layout.shim_path("gdb"));
 
         let report = install_shims(&layout, &source, &["cmake", "ninja", "rustc", "not-a-tool", "cmake"]).unwrap();
         assert_eq!(report.tool_names(), vec!["cmake", "ninja"]);
@@ -245,17 +240,13 @@ mod tests {
             report.skipped.iter().map(|s| s.tool.as_str()).collect::<Vec<_>>(),
             vec!["rustc", "not-a-tool"]
         );
-        assert_eq!(report.removed, vec!["clang"]);
+        assert_eq!(report.removed, vec!["clang", "lld", "gdb"]);
         assert!(!layout.shim_path("clang").exists());
+        assert!(!layout.shim_path("lld").exists() && !layout.shim_path("gdb").exists());
         assert_eq!(fs::read(layout.anvil_exe()).unwrap(), b"fake anvil binary");
         for shim in &report.created {
             assert_eq!(fs::read(&shim.path).unwrap(), b"fake anvil binary", "{shim:?}");
-            if cfg!(unix) {
-                assert_eq!(shim.kind, ShimKind::Symlink);
-                assert_eq!(fs::read_link(&shim.path).unwrap(), PathBuf::from("anvil"));
-            } else {
-                assert_eq!(shim.kind, ShimKind::HardLink);
-            }
+            assert_eq!(shim.kind, ShimKind::HardLink);
         }
 
         // Idempotent re-run with an updated binary.
@@ -265,8 +256,9 @@ mod tests {
         assert_eq!(fs::read(layout.shim_path("cmake")).unwrap(), b"new anvil binary");
         assert!(!layout.anvil_exe().with_extension("new").exists());
 
+        touch(&layout.shim_path("pkg-config"));
         let removed = remove_shims(&layout).unwrap();
-        assert_eq!(removed, vec!["cmake", "ninja", "anvil"]);
+        assert_eq!(removed, vec!["cmake", "ninja", "pkg-config", "anvil"]);
         assert_eq!(fs::read_dir(layout.bin_dir()).unwrap().count(), 0);
     }
 
@@ -281,7 +273,6 @@ mod tests {
     }
 
     /// Live upgrade: the shim being replaced is a running executable.
-    #[cfg(windows)]
     #[test]
     fn running_shim_is_set_aside_on_windows() {
         let dir = tempfile::tempdir().unwrap();

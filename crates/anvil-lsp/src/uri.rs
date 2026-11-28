@@ -1,4 +1,4 @@
-//! Conversion between local filesystem paths and `file://` URIs (Windows + Unix).
+//! Conversion between local Windows filesystem paths and `file://` URIs.
 
 use std::path::{Path, PathBuf};
 
@@ -64,7 +64,7 @@ pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
     } else {
         // `file://server/share/x` names a UNC path.
         let (host, path) = rest.split_once('/')?;
-        if host.is_empty() || !cfg!(windows) {
+        if host.is_empty() {
             return None;
         }
         let path = percent_decode(path)?;
@@ -78,22 +78,16 @@ pub fn uri_to_path(uri: &str) -> Option<PathBuf> {
     if bytes.len() >= 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':' {
         let drive = (bytes[1] as char).to_ascii_uppercase();
         let rest = &decoded[2..];
-        if cfg!(windows) {
-            return Some(PathBuf::from(format!("{drive}{}", rest.replace('/', "\\"))));
-        }
-        return Some(PathBuf::from(format!("{drive}{rest}")));
+        return Some(PathBuf::from(format!("{drive}{}", rest.replace('/', "\\"))));
     }
 
     Some(PathBuf::from(decoded))
 }
 
-/// Normalise a `file://` URI for map lookup (case-insensitive drive letter on Windows).
+/// Normalise a `file://` URI for map lookup (case-insensitive on Windows).
 pub fn normalize_uri(uri: &str) -> String {
     if let Some(path) = uri_to_path(uri) {
-        if cfg!(windows) {
-            return path.to_string_lossy().replace('/', "\\").to_lowercase();
-        }
-        return path.to_string_lossy().into_owned();
+        return path.to_string_lossy().replace('/', "\\").to_lowercase();
     }
     uri.to_string()
 }
@@ -149,11 +143,7 @@ mod tests {
         let uri = path_to_uri(Path::new(r"C:\Users\Eli\my project\main.rs")).unwrap();
         assert_eq!(uri, "file:///C:/Users/Eli/my%20project/main.rs");
         let back = uri_to_path(&uri).unwrap();
-        if cfg!(windows) {
-            assert_eq!(back, PathBuf::from(r"C:\Users\Eli\my project\main.rs"));
-        } else {
-            assert_eq!(back, PathBuf::from("C:/Users/Eli/my project/main.rs"));
-        }
+        assert_eq!(back, PathBuf::from(r"C:\Users\Eli\my project\main.rs"));
     }
 
     #[test]
@@ -162,50 +152,28 @@ mod tests {
         assert_eq!(uri, "file://server/share/my%20dir/a.c");
         let extended = path_to_uri(Path::new(r"\\?\UNC\server\share\a.c")).unwrap();
         assert_eq!(extended, "file://server/share/a.c");
-        if cfg!(windows) {
-            assert_eq!(uri_to_path(&uri).unwrap(), PathBuf::from(r"\\server\share\my dir\a.c"));
-        } else {
-            assert_eq!(uri_to_path(&uri), None);
-        }
+        assert_eq!(uri_to_path(&uri).unwrap(), PathBuf::from(r"\\server\share\my dir\a.c"));
     }
 
     #[test]
     fn stray_percent_is_kept_literally() {
         assert_eq!(
-            uri_to_path("file:///home/u/100%25/50%done.rs").unwrap(),
-            PathBuf::from("/home/u/100%/50%done.rs")
+            uri_to_path("file:///C:/u/100%25/50%done.rs").unwrap(),
+            PathBuf::from(r"C:\u\100%\50%done.rs")
         );
-    }
-
-    #[test]
-    fn unix_uri_round_trip() {
-        let back = uri_to_path("file:///home/eli/my%20proj/src/lib.rs").unwrap();
-        assert_eq!(back, PathBuf::from("/home/eli/my proj/src/lib.rs"));
     }
 
     #[test]
     fn percent_encoded_colon_decodes_cleanly() {
         let back = uri_to_path("file:///c%3A/dev/hello.c").unwrap();
-        if cfg!(windows) {
-            assert_eq!(back, PathBuf::from(r"C:\dev\hello.c"));
-        } else {
-            assert_eq!(back, PathBuf::from("C:/dev/hello.c"));
-        }
+        assert_eq!(back, PathBuf::from(r"C:\dev\hello.c"));
     }
 
     #[test]
     fn windows_lowercase_drive_uri_normalizes_to_uppercase() {
         let back = uri_to_path("file:///c:/Users/Eli/rtest/src/main.rs").unwrap();
-        if cfg!(windows) {
-            assert_eq!(back, PathBuf::from(r"C:\Users\Eli\rtest\src\main.rs"));
-        } else {
-            assert_eq!(back, PathBuf::from("C:/Users/Eli/rtest/src/main.rs"));
-        }
+        assert_eq!(back, PathBuf::from(r"C:\Users\Eli\rtest\src\main.rs"));
         let d_back = uri_to_path("file:///d:/anvil/src/lib.rs").unwrap();
-        if cfg!(windows) {
-            assert_eq!(d_back, PathBuf::from(r"D:\anvil\src\lib.rs"));
-        } else {
-            assert_eq!(d_back, PathBuf::from("D:/anvil/src/lib.rs"));
-        }
+        assert_eq!(d_back, PathBuf::from(r"D:\anvil\src\lib.rs"));
     }
 }

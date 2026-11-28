@@ -220,6 +220,10 @@ pub struct CcBuildRequest {
     pub build_dir: String,
     pub build_type: String,
     pub target: Option<String>,
+    /// Link the C/C++ runtime statically (`-static`) for standalone Windows `.exe` binaries.
+    /// `None` = automatic: on for single-file C++ and for fresh CMake build directories,
+    /// off with sanitizers or shared libraries (see [`cmake_static_args`]).
+    pub static_link: Option<bool>,
     pub extra_args: Vec<String>,
     pub timeout: Duration,
 }
@@ -274,6 +278,13 @@ pub fn run_cc_build(layout: &InstallLayout, req: &CcBuildRequest) -> Result<Tool
         }
         cfg_args.push(format!("-DCMAKE_CXX_COMPILER={}", clangxx.path.display()));
     }
+    let cached_linker_flags = read_cmake_cache_value(&build_path, "CMAKE_EXE_LINKER_FLAGS");
+    cfg_args.extend(cmake_static_args(
+        req.static_link,
+        &req.extra_args,
+        cached_linker_flags.as_deref(),
+        &mut warnings,
+    ));
     cfg_args.extend(req.extra_args.iter().cloned());
 
     let mut cfg_cmd = Command::new(&cmake.path);
@@ -371,7 +382,7 @@ fn compile_single_cc_file(
     let tool_name = if is_cpp { "clang++" } else { "clang" };
     let compiler = resolve_tool(layout, tool_name)
         .ok_or_else(|| format!("{tool_name} not found in Anvil toolchains or PATH (run `anvil install`)"))?;
-    let warnings: Vec<String> = path_fallback_warning(layout, tool_name, &compiler)
+    let mut warnings: Vec<String> = path_fallback_warning(layout, tool_name, &compiler)
         .into_iter()
         .collect();
 
@@ -396,6 +407,11 @@ fn compile_single_cc_file(
         if !req.extra_args.iter().any(|a| a == default_flag) {
             args.push(default_flag.into());
         }
+    }
+    match resolve_single_file_static_link(is_cpp, req.static_link, &req.extra_args) {
+        StaticLinkDecision::Add => args.push("-static".into()),
+        StaticLinkDecision::SkipWithWarning(w) => warnings.push(w),
+        StaticLinkDecision::Skip => {}
     }
     args.push(abs_file.display().to_string());
     args.push("-o".into());
@@ -431,6 +447,120 @@ fn compile_single_cc_file(
         stderr,
         truncated: t1 || t2,
     })
+}
+
+const STATIC_SKIPPED_SANITIZERS: &str = "static_link=true skipped because sanitizers require the dynamic runtime DLLs";
+
+/// `true` for CMake values that enable an option.
+fn cmake_value_enabled(value: &str) -> bool {
+    !matches!(
+        value.trim().to_ascii_uppercase().as_str(),
+        "" | "OFF" | "0" | "FALSE" | "NO" | "N" | "IGNORE" | "NOTFOUND"
+    )
+}
+
+/// Split `-DNAME[:TYPE]=VALUE` into `(NAME, VALUE)`.
+fn cmake_define(arg: &str) -> Option<(&str, &str)> {
+    let (name, value) = arg.strip_prefix("-D")?.split_once('=')?;
+    Some((name.split(':').next().unwrap_or(name), value))
+}
+
+/// Sanitizers or shared libraries make a static C++ runtime unsafe for CMake builds:
+/// `-fsanitize=...` flags, `-D<...SANITIZ...>=<enabled>` project options, `BUILD_SHARED_LIBS=ON`.
+fn cmake_static_incompatible(extra_args: &[String]) -> bool {
+    has_sanitizer_flag(extra_args)
+        || extra_args.iter().filter_map(|a| cmake_define(a)).any(|(name, value)| {
+            let name = name.to_ascii_uppercase();
+            (name.contains("SANITIZ") || name == "BUILD_SHARED_LIBS") && cmake_value_enabled(value)
+        })
+}
+
+/// Read `NAME:TYPE=VALUE` from `<build>/CMakeCache.txt`.
+fn read_cmake_cache_value(build_dir: &Path, name: &str) -> Option<String> {
+    let text = std::fs::read_to_string(build_dir.join("CMakeCache.txt")).ok()?;
+    text.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        (key.split(':').next() == Some(name)).then(|| value.to_string())
+    })
+}
+
+/// CMake configure arguments implementing `static_link` (standalone `.exe` without
+/// `libc++.dll`/`libunwind.dll`):
+///
+/// * user-provided `CMAKE_EXE_LINKER_FLAGS` always wins (nothing added);
+/// * `None` (default): `-DCMAKE_EXE_LINKER_FLAGS_INIT=-static`, which only seeds a
+///   fresh build directory and never overrides flags cached by an earlier configure;
+/// * `Some(true)`: forces `-DCMAKE_EXE_LINKER_FLAGS=-static`;
+/// * sanitizers / shared libs / `Some(false)`: no `-static`, and a cached `-static`
+///   left by Anvil is reset.
+fn cmake_static_args(
+    explicit: Option<bool>,
+    extra_args: &[String],
+    cached_linker_flags: Option<&str>,
+    warnings: &mut Vec<String>,
+) -> Vec<String> {
+    if extra_args.iter().any(|a| a.contains("CMAKE_EXE_LINKER_FLAGS")) {
+        return Vec::new();
+    }
+    let reset = if cached_linker_flags.map(str::trim) == Some("-static") {
+        vec!["-DCMAKE_EXE_LINKER_FLAGS=".to_string()]
+    } else {
+        Vec::new()
+    };
+    if explicit == Some(false) {
+        return reset;
+    }
+    if cmake_static_incompatible(extra_args) {
+        if explicit == Some(true) {
+            warnings.push(STATIC_SKIPPED_SANITIZERS.into());
+        }
+        return reset;
+    }
+    if explicit == Some(true) {
+        vec!["-DCMAKE_EXE_LINKER_FLAGS=-static".into()]
+    } else {
+        vec!["-DCMAKE_EXE_LINKER_FLAGS_INIT=-static".into()]
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum StaticLinkDecision {
+    Add,
+    Skip,
+    SkipWithWarning(String),
+}
+
+fn has_sanitizer_flag(extra_args: &[String]) -> bool {
+    extra_args
+        .iter()
+        .any(|a| a.starts_with("-fsanitize=") || a.contains("-fsanitize="))
+}
+
+fn resolve_single_file_static_link(is_cpp: bool, explicit: Option<bool>, extra_args: &[String]) -> StaticLinkDecision {
+    if explicit == Some(false) {
+        return StaticLinkDecision::Skip;
+    }
+    let want_static = explicit.unwrap_or(is_cpp);
+    if !want_static {
+        return StaticLinkDecision::Skip;
+    }
+    // Already requested explicitly or compiling without linking / building a DLL.
+    let already_or_incompatible = extra_args.iter().any(|a| {
+        matches!(
+            a.as_str(),
+            "-static" | "-shared" | "-c" | "-S" | "-E" | "-dynamic" | "-Wl,-Bdynamic"
+        )
+    });
+    if already_or_incompatible {
+        return StaticLinkDecision::Skip;
+    }
+    if has_sanitizer_flag(extra_args) {
+        if explicit == Some(true) {
+            return StaticLinkDecision::SkipWithWarning(STATIC_SKIPPED_SANITIZERS.into());
+        }
+        return StaticLinkDecision::Skip;
+    }
+    StaticLinkDecision::Add
 }
 
 pub struct CcLintFormatRequest {
@@ -739,5 +869,91 @@ mod tests {
         assert_eq!(from_anvil.source, ToolchainSource::Anvil);
         assert_eq!(from_anvil.path, anvil_cargo);
         assert!(path_fallback_warning(&layout, "cargo", &from_anvil).is_none());
+    }
+
+    #[test]
+    fn cmake_static_link_defaults_safely() {
+        let s = |xs: &[&str]| xs.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+        let run = |explicit, args: &[&str], cached: Option<&str>| {
+            let mut w = Vec::new();
+            let out = cmake_static_args(explicit, &s(args), cached, &mut w);
+            (out, w)
+        };
+        // Default: only seeds a fresh build dir.
+        assert_eq!(run(None, &[], None).0, s(&["-DCMAKE_EXE_LINKER_FLAGS_INIT=-static"]));
+        assert_eq!(run(Some(true), &[], None).0, s(&["-DCMAKE_EXE_LINKER_FLAGS=-static"]));
+        assert!(run(Some(false), &[], None).0.is_empty());
+        // Sanitizers (flags or project options) and shared libs disable it.
+        for args in [
+            &["-DCMAKE_CXX_FLAGS=-fsanitize=address"][..],
+            &["-DENABLE_SANITIZERS=ON"],
+            &["-DUSE_SANITIZER:STRING=address"],
+            &["-DBUILD_SHARED_LIBS=ON"],
+        ] {
+            assert!(run(None, args, None).0.is_empty(), "{args:?}");
+        }
+        assert_eq!(run(None, &["-DENABLE_SANITIZERS=OFF"], None).0.len(), 1);
+        let (out, w) = run(Some(true), &["-DENABLE_SANITIZERS=ON"], None);
+        assert!(out.is_empty() && w.len() == 1);
+        // A cached `-static` from Anvil is reset when it no longer applies.
+        assert_eq!(
+            run(Some(false), &[], Some("-static")).0,
+            s(&["-DCMAKE_EXE_LINKER_FLAGS="])
+        );
+        assert_eq!(
+            run(None, &["-DENABLE_SANITIZERS=ON"], Some("-static")).0,
+            s(&["-DCMAKE_EXE_LINKER_FLAGS="])
+        );
+        assert!(
+            run(Some(false), &[], Some("-Wl,--foo")).0.is_empty(),
+            "user flags untouched"
+        );
+        // User-provided linker flags always win.
+        assert!(run(Some(true), &["-DCMAKE_EXE_LINKER_FLAGS=-s"], None).0.is_empty());
+    }
+
+    #[test]
+    fn single_file_static_link_defaults_safely() {
+        let s = |xs: &[&str]| xs.iter().map(|v| v.to_string()).collect::<Vec<_>>();
+        // C++ defaults to -static so standalone Windows .exe runs without libc++.dll/libunwind.dll.
+        assert_eq!(
+            resolve_single_file_static_link(true, None, &[]),
+            StaticLinkDecision::Add
+        );
+        // C defaults to UCRT only (no -static needed unless explicitly requested).
+        assert_eq!(
+            resolve_single_file_static_link(false, None, &[]),
+            StaticLinkDecision::Skip
+        );
+        assert_eq!(
+            resolve_single_file_static_link(false, Some(true), &[]),
+            StaticLinkDecision::Add
+        );
+        // Opting out explicitly works.
+        assert_eq!(
+            resolve_single_file_static_link(true, Some(false), &[]),
+            StaticLinkDecision::Skip
+        );
+        // Sanitizers, -shared, -c, and existing -static disable automatic injection.
+        assert_eq!(
+            resolve_single_file_static_link(true, None, &s(&["-fsanitize=address,undefined"])),
+            StaticLinkDecision::Skip
+        );
+        assert!(matches!(
+            resolve_single_file_static_link(true, Some(true), &s(&["-fsanitize=address"])),
+            StaticLinkDecision::SkipWithWarning(_)
+        ));
+        assert_eq!(
+            resolve_single_file_static_link(true, None, &s(&["-shared"])),
+            StaticLinkDecision::Skip
+        );
+        assert_eq!(
+            resolve_single_file_static_link(true, None, &s(&["-c"])),
+            StaticLinkDecision::Skip
+        );
+        assert_eq!(
+            resolve_single_file_static_link(true, None, &s(&["-static"])),
+            StaticLinkDecision::Skip
+        );
     }
 }

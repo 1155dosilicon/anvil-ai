@@ -36,11 +36,7 @@ fn read_json(path: &Path) -> Value {
 /// Pre-existing user configuration of the four agents inside the sandbox.
 fn seed_agents(sandbox: &Path) -> Agents {
     let home = sandbox.join("home");
-    let desktop_dir = if cfg!(windows) {
-        home.join("AppData").join("Roaming").join("Claude")
-    } else {
-        home.join(".config").join("Claude")
-    };
+    let desktop_dir = home.join("AppData").join("Roaming").join("Claude");
     let a = Agents {
         sf_config: home.join(".siliconflower").join("config.json"),
         sf_user_skill: home.join(".siliconflower").join("skills").join("team-rules.md"),

@@ -1,9 +1,9 @@
 //! Real vs. sandboxed user environment.
 //!
 //! Every component that touches files or settings *outside* `ANVIL_HOME`
-//! (user PATH, shell profiles, AI agent configuration files) takes an
+//! (user PATH, AI agent configuration files) takes an
 //! [`EnvMode`]. Tests always use [`EnvMode::Sandbox`], so they can never
-//! modify the real registry, `$HOME` or agent configs.
+//! modify the real registry, `%USERPROFILE%` or agent configs.
 
 use std::path::PathBuf;
 
@@ -12,7 +12,7 @@ pub const ENV_SANDBOX_VAR: &str = "ANVIL_ENV_SANDBOX";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnvMode {
-    /// The real user environment (registry / `$HOME`).
+    /// The real user environment (registry / `%USERPROFILE%`).
     Real,
     /// Isolated: everything happens below this directory.
     Sandbox(PathBuf),

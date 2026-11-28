@@ -1,13 +1,11 @@
-//! Persistent user environment (`ANVIL_HOME/bin` on the user's PATH).
+//! Persistent user environment (`ANVIL_HOME\bin` on the user's PATH).
 //!
-//! * Windows: `HKCU\Environment\Path` (+ `ANVIL_HOME`), followed by a
-//!   `WM_SETTINGCHANGE` broadcast so Explorer, new terminals and GUI apps pick
-//!   it up without logging off. No administrator rights are needed.
-//! * Linux: `environment.d` + shell profile blocks (see [`crate::profile`]).
+//! Modifies `HKCU\Environment\Path` (+ `ANVIL_HOME`), followed by a
+//! `WM_SETTINGCHANGE` broadcast so Explorer, new terminals and GUI apps pick
+//! it up without logging off. No administrator rights are needed.
 //!
-//! [`EnvMode::Sandbox`] redirects everything into a directory (fake `$HOME`
-//! on Linux, a JSON file standing in for `HKCU\Environment` on Windows) so
-//! tests never touch the real registry or the real `$HOME`.
+//! [`EnvMode::Sandbox`] redirects everything into a JSON file standing in for
+//! `HKCU\Environment` so tests never touch the real registry.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -39,91 +37,30 @@ impl EnvChange {
     }
 }
 
-/// Add `ANVIL_HOME/bin` to the persistent user PATH. Idempotent.
+/// Add `ANVIL_HOME\bin` to the persistent user PATH. Idempotent.
 pub fn apply_user_env(mode: &EnvMode, layout: &InstallLayout) -> Result<EnvChange> {
-    let mut change = platform_apply(mode, layout)?;
+    let mut change = apply_windows_env(windows_store(mode)?.as_mut(), layout)?;
     change.sandbox = mode.is_sandbox();
     Ok(change)
 }
 
 /// Undo [`apply_user_env`]. Idempotent.
 pub fn remove_user_env(mode: &EnvMode, layout: &InstallLayout) -> Result<EnvChange> {
-    let mut change = platform_remove(mode, layout)?;
+    let mut change = remove_windows_env(windows_store(mode)?.as_mut(), layout)?;
     change.sandbox = mode.is_sandbox();
     Ok(change)
 }
 
 /// Whether the persistent user environment points to `layout`.
 pub fn user_env_configured(mode: &EnvMode, layout: &InstallLayout) -> Result<bool> {
-    platform_status(mode, layout)
+    windows_env_status(windows_store(mode)?.as_ref(), layout)
 }
 
-// ---------------------------------------------------------------------------
-// Linux / Unix
-// ---------------------------------------------------------------------------
-
-#[cfg(not(windows))]
-fn linux_paths(mode: &EnvMode) -> Result<crate::profile::LinuxEnvPaths> {
-    use crate::error::EnvError;
-    match mode {
-        EnvMode::Sandbox(root) => {
-            let home = root.join("home");
-            Ok(crate::profile::LinuxEnvPaths::new(&home, home.join(".config")))
-        }
-        EnvMode::Real => {
-            let home = std::env::var_os("HOME")
-                .filter(|h| !h.is_empty())
-                .map(PathBuf::from)
-                .ok_or_else(|| EnvError::Environment("$HOME".into()))?;
-            let config = std::env::var_os("XDG_CONFIG_HOME")
-                .map(PathBuf::from)
-                .filter(|p| p.is_absolute())
-                .unwrap_or_else(|| home.join(".config"));
-            Ok(crate::profile::LinuxEnvPaths::new(home, config))
-        }
-    }
-}
-
-#[cfg(not(windows))]
-fn platform_apply(mode: &EnvMode, layout: &InstallLayout) -> Result<EnvChange> {
-    crate::profile::apply_linux_env(&linux_paths(mode)?, layout)
-}
-
-#[cfg(not(windows))]
-fn platform_remove(mode: &EnvMode, _layout: &InstallLayout) -> Result<EnvChange> {
-    crate::profile::remove_linux_env(&linux_paths(mode)?)
-}
-
-#[cfg(not(windows))]
-fn platform_status(mode: &EnvMode, layout: &InstallLayout) -> Result<bool> {
-    crate::profile::linux_env_status(&linux_paths(mode)?, layout)
-}
-
-// ---------------------------------------------------------------------------
-// Windows
-// ---------------------------------------------------------------------------
-
-#[cfg(windows)]
 fn windows_store(mode: &EnvMode) -> Result<Box<dyn WinEnvStore>> {
     Ok(match mode {
         EnvMode::Real => Box::new(registry::RegistryEnvStore::open()?),
         EnvMode::Sandbox(root) => Box::new(FileEnvStore::new(root.join(FileEnvStore::FILE_NAME))),
     })
-}
-
-#[cfg(windows)]
-fn platform_apply(mode: &EnvMode, layout: &InstallLayout) -> Result<EnvChange> {
-    apply_windows_env(windows_store(mode)?.as_mut(), layout)
-}
-
-#[cfg(windows)]
-fn platform_remove(mode: &EnvMode, layout: &InstallLayout) -> Result<EnvChange> {
-    remove_windows_env(windows_store(mode)?.as_mut(), layout)
-}
-
-#[cfg(windows)]
-fn platform_status(mode: &EnvMode, layout: &InstallLayout) -> Result<bool> {
-    windows_env_status(windows_store(mode)?.as_ref(), layout)
 }
 
 /// A string value of `HKCU\Environment`.
@@ -327,7 +264,6 @@ pub fn decode_reg_string(bytes: &[u8]) -> String {
     String::from_utf16_lossy(&units[..end])
 }
 
-#[cfg(windows)]
 mod registry {
     use super::{decode_reg_string, encode_reg_string, WinEnvStore, WinEnvValue};
     use crate::error::{EnvError, Result};

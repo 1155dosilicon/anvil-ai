@@ -14,17 +14,10 @@ pub fn run(args: &BundleArgs) -> Result<Outcome> {
         BundleCommand::InitUsb(a) => {
             let usb = absolutize(&a.usb)?;
             let current = std::env::current_exe().ok();
-            let win_exe = a
-                .win_exe
-                .as_deref()
-                .or_else(|| cfg!(windows).then(|| current.as_deref()).flatten());
-            let linux_bin = a
-                .linux_bin
-                .as_deref()
-                .or_else(|| cfg!(unix).then(|| current.as_deref()).flatten());
+            let win_exe = a.win_exe.as_deref().or(current.as_deref());
 
-            let report = init_usb(&usb, win_exe, linux_bin)?;
-            let human = format!(
+            let report = init_usb(&usb, win_exe)?;
+            let mut human = format!(
                 "USB initialized at {}\n  templates: {}\n  skills:    {}\n  binaries:  {}\n",
                 report.usb_dir.display(),
                 report.templates_written.join(", "),
@@ -35,6 +28,9 @@ pub fn run(args: &BundleArgs) -> Result<Outcome> {
                     report.binaries_copied.join(", ")
                 }
             );
+            if !report.removed_legacy.is_empty() {
+                let _ = writeln!(human, "  removed (legacy Linux): {}", report.removed_legacy.join(", "));
+            }
             Ok(Outcome {
                 json: Some(json!({ "ok": true, "command": "bundle init-usb", "report": report })),
                 human,
@@ -154,6 +150,9 @@ pub fn run(args: &BundleArgs) -> Result<Outcome> {
                     b.platform,
                     b.version
                 );
+            }
+            for w in &report.warnings {
+                let _ = writeln!(human, "warning: {w}");
             }
             for e in &report.errors {
                 let _ = writeln!(human, "error: {e}");

@@ -120,9 +120,6 @@ fn missing_real_tool_fails_cleanly() {
     let layout = setup(&tmp.path().join("home"));
     // A shim for `ninja` whose real binary is absent.
     let ninja = layout.shim_path("ninja");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink("anvil", &ninja).unwrap();
-    #[cfg(windows)]
     std::fs::copy(layout.anvil_exe(), &ninja).unwrap();
 
     let out = run(&mut shim(&layout, "ninja"));

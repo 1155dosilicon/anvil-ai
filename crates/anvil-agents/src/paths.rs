@@ -9,17 +9,14 @@ use crate::error::{AgentError, Result};
 /// User directories relevant to agent configuration.
 ///
 /// In [`EnvMode::Sandbox`] every path is below the sandbox directory and
-/// override variables (`SILICONFLOWER_DATA_DIR`, `CODEX_HOME`, `APPDATA`,
-/// `XDG_CONFIG_HOME`) are ignored, so a sandbox can never leak into the real
-/// user profile.
+/// override variables (`SILICONFLOWER_DATA_DIR`, `CODEX_HOME`, `APPDATA`)
+/// are ignored, so a sandbox can never leak into the real user profile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentPaths {
-    /// `$HOME` / `%USERPROFILE%`.
+    /// `%USERPROFILE%`.
     pub home: PathBuf,
-    /// `%APPDATA%` (Windows only).
-    pub appdata: Option<PathBuf>,
-    /// `$XDG_CONFIG_HOME` or `~/.config` (non-Windows).
-    pub config_dir: PathBuf,
+    /// `%APPDATA%` (`%USERPROFILE%\AppData\Roaming`).
+    pub appdata: PathBuf,
     /// `$SILICONFLOWER_DATA_DIR` override.
     pub siliconflower_data_dir: Option<PathBuf>,
     /// `$CODEX_HOME` override.
@@ -45,8 +42,7 @@ impl AgentPaths {
     pub fn sandbox(root: &Path) -> Self {
         let home = root.join("home");
         Self {
-            appdata: cfg!(windows).then(|| home.join("AppData").join("Roaming")),
-            config_dir: home.join(".config"),
+            appdata: home.join("AppData").join("Roaming"),
             siliconflower_data_dir: None,
             codex_home: None,
             home,
@@ -54,20 +50,12 @@ impl AgentPaths {
     }
 
     pub fn real() -> Result<Self> {
-        let home = if cfg!(windows) {
-            env_dir("USERPROFILE").or_else(|| env_dir("HOME"))
-        } else {
-            env_dir("HOME")
-        }
-        .ok_or_else(|| AgentError::Environment("the user home directory ($HOME / %USERPROFILE%)".into()))?;
-        let appdata = if cfg!(windows) {
-            Some(env_dir("APPDATA").unwrap_or_else(|| home.join("AppData").join("Roaming")))
-        } else {
-            None
-        };
+        let home = env_dir("USERPROFILE")
+            .or_else(|| env_dir("HOME"))
+            .ok_or_else(|| AgentError::Environment("the user home directory (%USERPROFILE%)".into()))?;
+        let appdata = env_dir("APPDATA").unwrap_or_else(|| home.join("AppData").join("Roaming"));
         Ok(Self {
             appdata,
-            config_dir: env_dir("XDG_CONFIG_HOME").unwrap_or_else(|| home.join(".config")),
             siliconflower_data_dir: env_dir("SILICONFLOWER_DATA_DIR"),
             codex_home: env_dir("CODEX_HOME"),
             home,
@@ -88,12 +76,9 @@ impl AgentPaths {
         self.home.join(".claude")
     }
 
-    /// `%APPDATA%\Claude` (Windows) or `~/.config/Claude` (Linux).
+    /// `%APPDATA%\Claude`.
     pub fn claude_desktop_dir(&self) -> PathBuf {
-        match &self.appdata {
-            Some(appdata) if cfg!(windows) => appdata.join("Claude"),
-            _ => self.config_dir.join("Claude"),
-        }
+        self.appdata.join("Claude")
     }
 
     pub fn codex_dir(&self) -> PathBuf {

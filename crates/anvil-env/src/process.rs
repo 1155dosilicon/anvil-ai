@@ -71,47 +71,29 @@ pub fn tail_lines(text: &str, n: usize) -> String {
 
 /// Kill `child` **and its descendants** (best effort), then the child itself.
 ///
-/// * Windows: `taskkill /F /T /PID <pid>` walks the process tree (it must run
-///   while the child is still alive, so it comes before `Child::kill`).
-/// * Unix: children spawned by [`run_with_timeout`] lead their own process
-///   group (`process_group(0)`), so `kill -KILL -- -<pid>` reaches the whole
-///   group. Done through the `kill` utility: no `libc`, no `unsafe`.
+/// Uses `taskkill /F /T /PID <pid>` to walk the Windows process tree (it must
+/// run while the child is still alive, so it comes before `Child::kill`).
 ///
 /// Grandchildren matter: they inherit the stdout/stderr pipes, and a surviving
 /// one would block the output readers long after the timeout.
 pub fn kill_tree(child: &mut Child) -> io::Result<()> {
     let pid = child.id().to_string();
-    let quiet = |cmd: &mut Command| {
-        let _ = cmd
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    };
-    if cfg!(windows) {
-        let system_taskkill = std::env::var_os("SystemRoot")
-            .map(|root| std::path::Path::new(&root).join("System32").join("taskkill.exe"))
-            .filter(|p| p.is_file());
-        let mut taskkill = Command::new(system_taskkill.unwrap_or_else(|| "taskkill".into()));
-        quiet(taskkill.args(["/F", "/T", "/PID", &pid]));
-    } else {
-        quiet(Command::new("kill").args(["-KILL", "--", &format!("-{pid}")]));
-    }
+    let system_taskkill = std::env::var_os("SystemRoot")
+        .map(|root| std::path::Path::new(&root).join("System32").join("taskkill.exe"))
+        .filter(|p| p.is_file());
+    let mut taskkill = Command::new(system_taskkill.unwrap_or_else(|| "taskkill".into()));
+    let _ = taskkill
+        .args(["/F", "/T", "/PID", &pid])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
     match child.kill() {
         // Already exited (e.g. killed with its tree above).
         Err(e) if e.kind() == io::ErrorKind::InvalidInput => Ok(()),
         other => other,
     }
 }
-
-#[cfg(unix)]
-fn own_process_group(cmd: &mut Command) {
-    use std::os::unix::process::CommandExt;
-    cmd.process_group(0);
-}
-
-#[cfg(not(unix))]
-fn own_process_group(_cmd: &mut Command) {}
 
 /// How long the output readers may keep running once the child has exited
 /// (or been killed). A detached grandchild that inherited the pipes would
@@ -153,7 +135,6 @@ fn snapshot(buf: &SharedBuf) -> String {
 pub fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> io::Result<Captured> {
     let started = Instant::now();
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    own_process_group(cmd);
     let mut child = cmd.spawn()?;
 
     let (done_tx, done_rx) = mpsc::channel();
@@ -219,15 +200,8 @@ mod tests {
     /// output pipes; without a tree kill the readers would block ~30 s.
     #[test]
     fn timeout_kills_the_whole_process_tree() {
-        let mut cmd = if cfg!(windows) {
-            let mut c = Command::new("cmd");
-            c.args(["/C", "ping -n 30 127.0.0.1 & echo done"]);
-            c
-        } else {
-            let mut c = Command::new("/bin/sh");
-            c.args(["-c", "sleep 30; echo done"]);
-            c
-        };
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "ping -n 30 127.0.0.1 & echo done"]);
         let out = run_with_timeout(&mut cmd, Duration::from_millis(700)).unwrap();
         assert!(out.timed_out());
         assert!(!out.stdout.contains("done"));
@@ -242,15 +216,8 @@ mod tests {
     /// output pipes: the call must return shortly, with the output so far.
     #[test]
     fn lingering_grandchild_does_not_block_after_exit() {
-        let mut cmd = if cfg!(windows) {
-            let mut c = Command::new("cmd");
-            c.args(["/C", "echo started & start /B ping -n 30 127.0.0.1 >NUL"]);
-            c
-        } else {
-            let mut c = Command::new("/bin/sh");
-            c.args(["-c", "echo started; sleep 30 & exit 0"]);
-            c
-        };
+        let mut cmd = Command::new("cmd");
+        cmd.args(["/C", "echo started & start /B ping -n 30 127.0.0.1 >NUL"]);
         let out = run_with_timeout(&mut cmd, Duration::from_secs(60)).unwrap();
         assert!(out.success(), "{}", out.describe_failure());
         assert!(out.stdout.contains("started"), "{:?}", out.stdout);

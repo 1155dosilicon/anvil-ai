@@ -308,21 +308,12 @@ fn check_path(opts: &DoctorOptions, warnings: &mut Vec<String>) -> PathCheck {
 }
 
 fn same_dir(a: &Path, b: &Path) -> bool {
-    if cfg!(windows) {
-        winpath::entries_equal(&a.to_string_lossy(), &b.to_string_lossy())
-    } else {
-        let trim = |p: &Path| p.to_string_lossy().trim_end_matches('/').to_string();
-        trim(a) == trim(b)
-    }
+    winpath::entries_equal(&a.to_string_lossy(), &b.to_string_lossy())
 }
 
 /// Arguments that make a tool print its version and exit.
-fn version_args(tool: &str) -> &'static [&'static str] {
-    match tool {
-        // `lld` alone is only a dispatcher; pick the ELF flavour explicitly.
-        "lld" => &["-flavor", "gnu", "--version"],
-        _ => &["--version"],
-    }
+fn version_args(_tool: &str) -> &'static [&'static str] {
+    &["--version"]
 }
 
 fn check_tool(opts: &DoctorOptions, name: &str) -> ToolCheck {
@@ -385,6 +376,8 @@ struct SmokeCase {
     file: &'static str,
     source: &'static str,
     extra_args: &'static [&'static str],
+    /// Rust target whose `rust-std` must be installed (skipped otherwise).
+    rust_target: Option<&'static str>,
 }
 
 const SMOKE_CASES: &[SmokeCase] = &[
@@ -394,13 +387,15 @@ const SMOKE_CASES: &[SmokeCase] = &[
         file: "hello.c",
         source: "#include <stdio.h>\nint main(void) { printf(\"hello from anvil (c)\\n\"); return 0; }\n",
         extra_args: &[],
+        rust_target: None,
     },
     SmokeCase {
         language: "c++",
         compiler: "clang++",
         file: "hello.cpp",
         source: "#include <iostream>\nint main() { std::cout << \"hello from anvil (c++)\" << std::endl; return 0; }\n",
-        extra_args: &[],
+        extra_args: &["-static"],
+        rust_target: None,
     },
     SmokeCase {
         language: "rust",
@@ -408,6 +403,23 @@ const SMOKE_CASES: &[SmokeCase] = &[
         file: "hello.rs",
         source: "fn main() { println!(\"hello from anvil (rust)\"); }\n",
         extra_args: &["--edition", "2021"],
+        rust_target: None,
+    },
+    SmokeCase {
+        language: "rust-gnullvm",
+        compiler: "rustc",
+        file: "hello_gnullvm.rs",
+        source: "fn main() { println!(\"hello from anvil (rust-gnullvm)\"); }
+",
+        extra_args: &[
+            "--edition",
+            "2021",
+            "--target",
+            crate::dispatch::GNULLVM_TRIPLE,
+            "-C",
+            "target-feature=+crt-static",
+        ],
+        rust_target: Some(crate::dispatch::GNULLVM_TRIPLE),
     },
 ];
 
@@ -449,12 +461,19 @@ fn run_smoke_case(opts: &DoctorOptions, case: &SmokeCase, dir: &Path) -> SmokeTe
         ));
         return result;
     };
+    if case.rust_target.is_some() && !crate::dispatch::has_gnullvm_std(&opts.layout) {
+        result.detail = Some(format!(
+            "rust-std for {} is not installed",
+            case.rust_target.unwrap_or_default()
+        ));
+        return result;
+    }
     result.compiler = Some(compiler.clone());
 
     let src = dir.join(case.file);
     let exe = dir.join(format!(
         "hello-{}{}",
-        case.language.replace('+', "p"),
+        case.language.replace('+', "p").replace('-', "_"),
         std::env::consts::EXE_SUFFIX
     ));
     if let Err(e) = std::fs::write(&src, case.source) {
@@ -466,7 +485,7 @@ fn run_smoke_case(opts: &DoctorOptions, case: &SmokeCase, dir: &Path) -> SmokeTe
     let mut env = ToolEnv::for_layout(&opts.layout);
     let mut compile = Command::new(&compiler);
     compile.current_dir(dir).args(case.extra_args);
-    if cfg!(windows) && case.language == "rust" && crate::dispatch::has_windows_gnu_self_contained(&opts.layout) {
+    if case.language == "rust" && crate::dispatch::has_windows_gnu_self_contained(&opts.layout) {
         compile.args(["-C", "link-self-contained=yes"]);
         env.strip_dir_from_path(&opts.layout.toolchain_dir("llvm").join("bin"));
     }
@@ -476,15 +495,27 @@ fn run_smoke_case(opts: &DoctorOptions, case: &SmokeCase, dir: &Path) -> SmokeTe
     let step = |cmd: &mut Command, what: &str| -> Result<Captured, String> {
         match run_with_timeout(cmd, opts.smoke_timeout) {
             Ok(out) if out.success() => Ok(out),
-            Ok(out) => Err(format!("{what} failed ({})", out.describe_failure())),
+            Ok(out) => {
+                // 0xC0000135 (-1073741515) is STATUS_DLL_NOT_FOUND on Windows.
+                let dll_hint = if what == "execution" && out.status.and_then(|s| s.code()) == Some(-1073741515) {
+                    " (STATUS_DLL_NOT_FOUND: compiled binary depends on a missing toolchain DLL such as libc++.dll or libunwind.dll)"
+                } else {
+                    ""
+                };
+                Err(format!("{what} failed ({}){dll_hint}", out.describe_failure()))
+            }
             Err(e) => Err(format!("{what} could not start: {e}")),
         }
     };
 
     let outcome = step(&mut compile, "compilation").and_then(|c| {
+        // Run the compiled executable with a clean Windows system PATH (no
+        // `toolchains/*/bin` and no `ANVIL_HOME/bin`) so missing runtime DLL
+        // regressions are caught immediately.
         let mut run = Command::new(&exe);
-        run.current_dir(dir);
-        env.apply(&mut run);
+        run.current_dir(dir)
+            .env_remove(anvil_core::ANVIL_HOME_ENV)
+            .env("PATH", clean_windows_path());
         step(&mut run, "execution").map(|r| (c.elapsed + r.elapsed, r))
     });
     match outcome {
@@ -506,6 +537,17 @@ fn run_smoke_case(opts: &DoctorOptions, case: &SmokeCase, dir: &Path) -> SmokeTe
     result
 }
 
+/// Minimal Windows system `PATH` (`%SystemRoot%\System32;%SystemRoot%`) used to
+/// verify compiled smoke-test binaries run standalone without Anvil on `PATH`.
+pub fn clean_windows_path() -> std::ffi::OsString {
+    let sysroot = std::env::var_os("SystemRoot")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    std::env::join_paths([sysroot.join("System32"), sysroot])
+        .unwrap_or_else(|_| r"C:\Windows\System32;C:\Windows".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -524,7 +566,7 @@ mod tests {
         assert!(!report.ok);
         assert_eq!(report.state.status, Status::Missing);
         assert!(report.tools.is_empty());
-        assert_eq!(report.smoke_tests.len(), 3);
+        assert_eq!(report.smoke_tests.len(), 4);
         assert!(report.smoke_tests.iter().all(|s| s.status == Status::Skipped));
         assert_eq!(report.path.in_user_env, Some(false));
         // Must serialize to JSON.
@@ -599,5 +641,13 @@ mod tests {
         let check = check_tool(&opts(dir.path(), false), "clang");
         assert_eq!(check.status, Status::Missing);
         assert_eq!(check.toolchain, "llvm");
+    }
+
+    #[test]
+    fn clean_windows_path_contains_only_system_dirs() {
+        let p = clean_windows_path();
+        let dirs: Vec<PathBuf> = std::env::split_paths(&p).collect();
+        assert_eq!(dirs.len(), 2);
+        assert!(dirs[0].to_string_lossy().to_ascii_lowercase().ends_with("system32"));
     }
 }
