@@ -47,8 +47,8 @@ fn full_install_doctor_uninstall_cycle() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|w| w.as_str().unwrap().contains("'gdb'")),
-        "gdb is listed but not shipped: {doc:#}"
+            .any(|w| w.as_str().unwrap().contains("'ctest'")),
+        "ctest is listed but not shipped: {doc:#}"
     );
     assert_eq!(doc["env_configured"], true);
     assert_eq!(doc["env"]["sandbox"], true);
@@ -90,14 +90,8 @@ fn full_install_doctor_uninstall_cycle() {
 
     // sandboxed user environment
     assert!(user_env_configured(&env_mode, &layout).unwrap());
-    if cfg!(windows) {
-        let reg = fs::read_to_string(sandbox.join("hkcu-environment.json")).unwrap();
-        assert!(reg.contains("ANVIL_HOME"), "{reg}");
-    } else {
-        let profile = fs::read_to_string(sandbox.join("home/.profile")).unwrap();
-        assert_eq!(profile.matches("# >>> anvil >>>").count(), 1);
-        assert!(sandbox.join("home/.config/environment.d/90-anvil.conf").is_file());
-    }
+    let reg = fs::read_to_string(sandbox.join("hkcu-environment.json")).unwrap();
+    assert!(reg.contains("ANVIL_HOME"), "{reg}");
 
     // --- idempotent re-install -------------------------------------------
     let out = run(&mut install_cmd(&sandbox, &usb.root, &home));
@@ -105,10 +99,6 @@ fn full_install_doctor_uninstall_cycle() {
     let doc = json(&out);
     assert_eq!(doc["bundles"][0]["status"], "unchanged");
     assert_eq!(doc["env"]["modified"], serde_json::json!([]));
-    if !cfg!(windows) {
-        let profile = fs::read_to_string(sandbox.join("home/.profile")).unwrap();
-        assert_eq!(profile.matches("# >>> anvil >>>").count(), 1, "no duplicated block");
-    }
 
     // --- shim runs the real tool -----------------------------------------
     let out = run(std::process::Command::new(layout.shim_path("cmake"))
@@ -144,7 +134,7 @@ fn full_install_doctor_uninstall_cycle() {
     assert_eq!(doc["ok"], true, "{doc:#}");
     let smoke = doc["smoke_tests"].as_array().unwrap();
     let langs: Vec<&str> = smoke.iter().map(|s| s["language"].as_str().unwrap()).collect();
-    assert_eq!(langs, vec!["c", "c++", "rust"]);
+    assert_eq!(langs, vec!["c", "c++", "rust", "rust-gnullvm"]);
     assert!(smoke.iter().all(|s| s["status"] == "skipped"), "{doc:#}");
 
     // --- env --shell json ---------------------------------------------------
@@ -176,15 +166,8 @@ fn full_install_doctor_uninstall_cycle() {
     assert_eq!(doc["leftovers"], serde_json::json!([]));
     assert!(!home.exists(), "install dir must be gone");
     assert!(!user_env_configured(&env_mode, &layout).unwrap(), "PATH entry removed");
-    if cfg!(windows) {
-        let reg = fs::read_to_string(sandbox.join("hkcu-environment.json")).unwrap();
-        assert!(!reg.contains("ANVIL_HOME"), "{reg}");
-    } else {
-        assert!(!fs::read_to_string(sandbox.join("home/.profile"))
-            .unwrap()
-            .contains("anvil >>>"));
-        assert!(!sandbox.join("home/.config/environment.d/90-anvil.conf").exists());
-    }
+    let reg = fs::read_to_string(sandbox.join("hkcu-environment.json")).unwrap();
+    assert!(!reg.contains("ANVIL_HOME"), "{reg}");
 
     // A second uninstall refuses to touch anything and reports JSON.
     let out = run(anvil(&sandbox)
@@ -314,12 +297,7 @@ fn help_and_shell_scripts() {
     for cmd in ["install", "doctor", "env", "uninstall"] {
         assert!(help.contains(cmd), "{help}");
     }
-    for (shell, needle) in [
-        ("powershell", "$env:ANVIL_HOME"),
-        ("bash", "export ANVIL_HOME="),
-        ("zsh", "export PATH="),
-        ("fish", "set -gx ANVIL_HOME"),
-    ] {
+    for (shell, needle) in [("powershell", "$env:ANVIL_HOME"), ("json", "\"ANVIL_HOME\"")] {
         let out = run(anvil(tmp.path())
             .arg("env")
             .arg("--dest")

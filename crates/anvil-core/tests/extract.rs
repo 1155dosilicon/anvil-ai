@@ -327,42 +327,19 @@ fn rejects_symlink_escaping_destination() {
     assert!(matches!(err, CoreError::UnsafeEntry { .. }), "{err}");
 }
 
-#[cfg(unix)]
+/// `x/a -> ..` is harmless on its own, but `x/a/b -> ..` would then be created
+/// *through* it. With symlinks available the second link is rejected (beneath a
+/// symlink); without them (no Developer Mode) the copy fallback refuses the loop
+/// instead of recursing until the path is too long. Nothing is installed.
 #[test]
-fn keeps_internal_symlinks_and_blocks_chained_escape() {
+fn blocks_chained_escape_and_symlink_loops() {
     let tmp = tempfile::tempdir().unwrap();
-    let archive = tmp.path().join("ok.tar.zst");
-    let sha = hostile_tar_zst(
-        &archive,
-        &[
-            Raw::File(b"bin/clang-20", b"#!clang"),
-            Raw::Symlink(b"bin/clang", b"clang-20"),
-        ],
-    );
-    let dest = tmp.path().join("home/toolchains/llvm");
-    extract_bundle_streaming(
-        &ExtractRequest {
-            id: "llvm",
-            archive: &archive,
-            expected_sha256: &sha,
-            expected_size: None,
-            dest: &dest,
-        },
-        &mut SilentProgress,
-    )
-    .unwrap();
-    assert_eq!(
-        fs::read_link(dest.join("bin/clang")).unwrap(),
-        PathBuf::from("clang-20")
-    );
-    assert_eq!(fs::read_to_string(dest.join("bin/clang")).unwrap(), "#!clang");
-
-    // `a -> .` is harmless on its own, but `a/b -> ..` would then point outside.
-    let (err, _) = extract_hostile(
+    let (err, dest) = extract_hostile(
         tmp.path(),
         &[Raw::Symlink(b"x/a", b".."), Raw::Symlink(b"x/a/b", b"..")],
     );
     assert!(matches!(err, CoreError::UnsafeEntry { .. }), "{err}");
+    assert!(!dest.exists());
 }
 
 /// `d/s -> ..` resolves to the root; `d/t -> s/..` looks like `d` lexically

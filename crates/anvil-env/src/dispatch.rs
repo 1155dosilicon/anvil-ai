@@ -1,7 +1,6 @@
-//! Multicall dispatch: when the `anvil` binary is invoked under a tool name
+//! Multicall dispatch: when `anvil.exe` is invoked under a tool name
 //! (`clang`, `cargo`, `cmake`, ...) it locates the real binary inside
-//! `ANVIL_HOME/toolchains/*/bin` and runs it in a self-contained environment
-//! that does not depend on `.bashrc` or any user configuration.
+//! `ANVIL_HOME\toolchains\*\bin` and runs it in a self-contained environment.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -16,9 +15,8 @@ use crate::tools::{
 
 /// Entry point used by `main` **before** argument parsing.
 ///
-/// Returns `None` when the process was invoked as `anvil` (normal CLI), or
-/// `Some(result)` with the exit code of the real tool otherwise. On Unix a
-/// successful dispatch never returns (the process image is replaced).
+/// Returns `None` when the process was invoked as `anvil.exe` (normal CLI), or
+/// `Some(result)` with the exit code of the real tool otherwise.
 pub fn dispatch_multicall() -> Option<Result<i32>> {
     let mut args = std::env::args_os();
     let argv0 = args.next()?;
@@ -30,17 +28,12 @@ pub fn dispatch_multicall() -> Option<Result<i32>> {
 ///
 /// On Windows shims are hard links/copies, so the executable's own file name
 /// is authoritative (argv[0] is whatever the parent process chose to pass).
-/// On Unix shims are symlinks and `current_exe()` resolves them, so argv[0]
-/// is the only source of truth.
 fn invoked_tool(argv0: &OsStr) -> Option<&'static ManagedTool> {
-    #[cfg(windows)]
+    if let Some(name) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(OsStr::to_os_string))
     {
-        if let Some(name) = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.file_name().map(OsStr::to_os_string))
-        {
-            return tool_from_argv0(&name);
-        }
+        return tool_from_argv0(&name);
     }
     tool_from_argv0(argv0)
 }
@@ -84,13 +77,13 @@ pub fn prepare_command(
     let mut cmd = Command::new(&real);
     cmd.args(args);
     let mut env = ToolEnv::for_layout(layout);
-    // On Windows, `llvm-mingw` ships a Clang wrapper named `x86_64-w64-mingw32-gcc.exe`
+    // `llvm-mingw` ships a Clang wrapper named `x86_64-w64-mingw32-gcc.exe`
     // that uses compiler-rt instead of libgcc. If `rustc` sees it on PATH while compiling
-    // for `x86_64-pc-windows-gnu`, it disables its own self-contained MinGW linker and fails
+    // for `x86_64-pc-windows-gnu` (including host build scripts and proc-macros when
+    // targeting `gnullvm`), it disables its own self-contained MinGW linker and fails
     // looking for `-lgcc_eh`. Removing `llvm/bin` from `rustc`'s PATH (unless targeting
     // `gnullvm`) lets `rustc` use its bundled self-contained linker automatically.
-    if cfg!(windows)
-        && tool.name == "rustc"
+    if tool.name == "rustc"
         && has_windows_gnu_self_contained(layout)
         && !args.iter().any(|a| a.to_string_lossy().contains("gnullvm"))
     {
@@ -100,15 +93,6 @@ pub fn prepare_command(
     Ok(cmd)
 }
 
-#[cfg(unix)]
-fn exec(mut cmd: Command) -> Result<i32> {
-    use std::os::unix::process::CommandExt;
-    let program = PathBuf::from(cmd.get_program());
-    let source = cmd.exec(); // only returns on failure
-    Err(EnvError::Spawn { program, source })
-}
-
-#[cfg(windows)]
 fn exec(mut cmd: Command) -> Result<i32> {
     use windows_sys::Win32::Foundation::BOOL;
     use windows_sys::Win32::System::Console::SetConsoleCtrlHandler;
@@ -138,15 +122,17 @@ pub struct ToolEnv {
 impl ToolEnv {
     /// Environment for the real tools of `layout`:
     ///
-    /// * `PATH` = `toolchains/*/bin` + inherited `PATH`, `ANVIL_HOME`, `CARGO_HOME`;
+    /// * `PATH` = `toolchains\*\bin` + inherited `PATH`, `ANVIL_HOME`, `CARGO_HOME`;
     /// * `CC` / `CXX` when Clang is installed, `CMAKE_GENERATOR=Ninja`;
-    /// * `RUSTC` = `toolchains/rust/bin/rustc` (a system `rustup` proxy must never
-    ///   hijack the isolated `cargo`) and `RUST_SRC_PATH` =
-    ///   `toolchains/rust/lib/rustlib/src/rust/library` (lets `rust-analyzer`
-    ///   resolve `std`/`core` offline, without `rustup`);
-    /// * Windows only: `CARGO_TARGET_X86_64_PC_WINDOWS_{GNULLVM,GNU}_LINKER` =
-    ///   `toolchains/llvm/bin/clang.exe`, so Cargo links with llvm-mingw/lld
-    ///   instead of looking for Visual Studio's `link.exe`.
+    /// * `RUSTC` = `bin\rustc.exe` shim when installed alongside self-contained MinGW
+    ///   (so host `build.rs` / proc-macro builds under `--target x86_64-pc-windows-gnullvm`
+    ///   strip `llvm\bin` automatically), falling back to `toolchains\rust\bin\rustc.exe`;
+    /// * `RUST_SRC_PATH` = `toolchains\rust\lib\rustlib\src\rust\library` (lets
+    ///   `rust-analyzer` resolve `std`/`core` offline without `rustup`);
+    /// * `CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS=-C link-self-contained=yes`
+    ///   and `CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER=toolchains\llvm\bin\clang.exe`;
+    /// * [`GNULLVM_RUSTFLAGS_VAR`] = [`GNULLVM_RUSTFLAGS`] when the `gnullvm` rust-std
+    ///   is installed and the user has not set it (standalone `.exe`, no `libunwind.dll`).
     pub fn for_layout(layout: &InstallLayout) -> Self {
         Self::with_base_path(layout, std::env::var_os("PATH"))
     }
@@ -165,8 +151,15 @@ impl ToolEnv {
 
         let rust = layout.toolchain_dir("rust");
         let rustc = rust.join("bin").join(exe_name("rustc"));
+        let self_contained_gnu = has_windows_gnu_self_contained(layout);
         if rustc.is_file() {
-            vars.push(("RUSTC".to_string(), rustc.into_os_string()));
+            let rustc_shim = layout.shim_path("rustc");
+            let selected = if self_contained_gnu && rustc_shim.is_file() {
+                rustc_shim
+            } else {
+                rustc
+            };
+            vars.push(("RUSTC".to_string(), selected.into_os_string()));
         }
         let rust_src = rust
             .join("lib")
@@ -178,23 +171,26 @@ impl ToolEnv {
             vars.push(("RUST_SRC_PATH".to_string(), rust_src.into_os_string()));
         }
 
-        if cfg!(windows) {
-            let clang = layout.toolchain_dir("llvm").join("bin").join(exe_name("clang"));
-            if has_windows_gnu_self_contained(layout) {
+        // A value set by the user wins (`anvil` never overrides it).
+        if has_gnullvm_std(layout) && std::env::var_os(GNULLVM_RUSTFLAGS_VAR).is_none() {
+            vars.push((GNULLVM_RUSTFLAGS_VAR.to_string(), OsString::from(GNULLVM_RUSTFLAGS)));
+        }
+
+        let clang = layout.toolchain_dir("llvm").join("bin").join(exe_name("clang"));
+        if self_contained_gnu {
+            vars.push((
+                "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS".to_string(),
+                OsString::from("-C link-self-contained=yes"),
+            ));
+            if clang.is_file() {
                 vars.push((
-                    "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS".to_string(),
-                    OsString::from("-C link-self-contained=yes"),
+                    "CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER".to_string(),
+                    clang.into_os_string(),
                 ));
-                if clang.is_file() {
-                    vars.push((
-                        "CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER".to_string(),
-                        clang.into_os_string(),
-                    ));
-                }
-            } else if clang.is_file() {
-                for var in WINDOWS_LINKER_VARS {
-                    vars.push((var.to_string(), clang.clone().into_os_string()));
-                }
+            }
+        } else if clang.is_file() {
+            for var in WINDOWS_LINKER_VARS {
+                vars.push((var.to_string(), clang.clone().into_os_string()));
             }
         }
         Self { vars }
@@ -215,13 +211,7 @@ impl ToolEnv {
         if let Some((_, val)) = self.vars.iter_mut().find(|(k, _)| k == "PATH") {
             let target = dir.to_string_lossy();
             let kept: Vec<PathBuf> = std::env::split_paths(val.as_os_str())
-                .filter(|p| {
-                    if cfg!(windows) {
-                        !crate::winpath::entries_equal(&p.to_string_lossy(), &target)
-                    } else {
-                        p != dir
-                    }
-                })
+                .filter(|p| !crate::winpath::entries_equal(&p.to_string_lossy(), &target))
                 .collect();
             if let Ok(joined) = std::env::join_paths(kept) {
                 *val = joined;
@@ -242,7 +232,26 @@ pub fn has_windows_gnu_self_contained(layout: &InstallLayout) -> bool {
         .is_dir()
 }
 
-/// Cargo linker overrides pointing at llvm-mingw's `clang.exe` (Windows only).
+/// Optional Rust target linked through llvm-mingw.
+pub const GNULLVM_TRIPLE: &str = "x86_64-pc-windows-gnullvm";
+
+/// Cargo flags for [`GNULLVM_TRIPLE`]: link `libunwind` and the C runtime
+/// statically so binaries run without `libunwind.dll` on `PATH`.
+pub const GNULLVM_RUSTFLAGS_VAR: &str = "CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_RUSTFLAGS";
+pub const GNULLVM_RUSTFLAGS: &str = "-C target-feature=+crt-static";
+
+/// Whether the isolated Rust toolchain ships `rust-std` for [`GNULLVM_TRIPLE`].
+pub fn has_gnullvm_std(layout: &InstallLayout) -> bool {
+    layout
+        .toolchain_dir("rust")
+        .join("lib")
+        .join("rustlib")
+        .join(GNULLVM_TRIPLE)
+        .join("lib")
+        .is_dir()
+}
+
+/// Cargo linker overrides pointing at llvm-mingw's `clang.exe`.
 pub const WINDOWS_LINKER_VARS: [&str; 2] = [
     "CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER",
     "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER",
@@ -252,9 +261,9 @@ fn exe_name(tool: &str) -> String {
     format!("{tool}{}", std::env::consts::EXE_SUFFIX)
 }
 
-/// `dirs` joined with the platform separator, followed by `base` (verbatim).
+/// `dirs` joined with `;`, followed by `base` (verbatim).
 pub fn prepend_path(dirs: &[PathBuf], base: Option<OsString>) -> OsString {
-    let sep = if cfg!(windows) { ";" } else { ":" };
+    let sep = ";";
     let mut out = OsString::new();
     for dir in dirs {
         if !out.is_empty() {
@@ -292,12 +301,8 @@ mod tests {
     #[test]
     fn path_prepending() {
         let dirs = vec![PathBuf::from("a"), PathBuf::from("b")];
-        let sep = if cfg!(windows) { ";" } else { ":" };
-        assert_eq!(
-            prepend_path(&dirs, Some("rest".into())),
-            OsString::from(format!("a{sep}b{sep}rest"))
-        );
-        assert_eq!(prepend_path(&dirs, None), OsString::from(format!("a{sep}b")));
+        assert_eq!(prepend_path(&dirs, Some("rest".into())), OsString::from("a;b;rest"));
+        assert_eq!(prepend_path(&dirs, None), OsString::from("a;b"));
         assert_eq!(prepend_path(&[], Some("rest".into())), OsString::from("rest"));
     }
 
@@ -322,9 +327,31 @@ mod tests {
         assert_eq!(env.get("RUSTC"), None, "rust toolchain is not installed");
         assert_eq!(env.get("RUST_SRC_PATH"), None);
         for var in WINDOWS_LINKER_VARS {
-            let expected = cfg!(windows).then_some(clang.as_os_str());
-            assert_eq!(env.get(var), expected, "{var}");
+            assert_eq!(env.get(var), Some(clang.as_os_str()), "{var}");
         }
+    }
+
+    #[test]
+    fn tool_env_prefers_rustc_shim_when_self_contained_gnu_is_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = InstallLayout::new(dir.path());
+        let rust = layout.toolchain_dir("rust");
+        let rustc = rust.join("bin").join(exe_name("rustc"));
+        std::fs::create_dir_all(rustc.parent().unwrap()).unwrap();
+        std::fs::write(&rustc, b"x").unwrap();
+        std::fs::create_dir_all(rust.join("lib/rustlib/x86_64-pc-windows-gnu/lib/self-contained")).unwrap();
+
+        // Without shim, falls back to real rustc binary.
+        let env = ToolEnv::with_base_path(&layout, None);
+        assert_eq!(env.get("RUSTC"), Some(rustc.as_os_str()));
+
+        // With bin/rustc.exe shim present, RUSTC routes through the shim so host build scripts
+        // strip llvm/bin from PATH even under `--target x86_64-pc-windows-gnullvm`.
+        let shim = layout.shim_path("rustc");
+        std::fs::create_dir_all(shim.parent().unwrap()).unwrap();
+        std::fs::write(&shim, b"shim").unwrap();
+        let env = ToolEnv::with_base_path(&layout, None);
+        assert_eq!(env.get("RUSTC"), Some(shim.as_os_str()));
     }
 
     #[test]
@@ -342,6 +369,13 @@ mod tests {
         assert_eq!(env.get("RUST_SRC_PATH"), None);
         for var in WINDOWS_LINKER_VARS {
             assert_eq!(env.get(var), None, "no clang → no linker override for {var}");
+        }
+
+        assert_eq!(env.get(GNULLVM_RUSTFLAGS_VAR), None, "no gnullvm rust-std");
+        std::fs::create_dir_all(rust.join("lib/rustlib").join(GNULLVM_TRIPLE).join("lib")).unwrap();
+        if std::env::var_os(GNULLVM_RUSTFLAGS_VAR).is_none() {
+            let env = ToolEnv::with_base_path(&layout, None);
+            assert_eq!(env.get(GNULLVM_RUSTFLAGS_VAR), Some(OsStr::new(GNULLVM_RUSTFLAGS)));
         }
 
         let src = rust.join("lib/rustlib/src/rust/library");

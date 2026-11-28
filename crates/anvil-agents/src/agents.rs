@@ -233,14 +233,7 @@ fn skills_apply(t: &SkillTarget, force_all: bool) -> bool {
 /// Paths are compared case- and separator-insensitively on Windows.
 pub fn same_path(a: &str, b: &Path) -> bool {
     let b = b.to_string_lossy();
-    let norm = |s: &str| {
-        let s = if cfg!(windows) {
-            s.replace('/', "\\").to_lowercase()
-        } else {
-            s.to_string()
-        };
-        s.trim_end_matches(['/', '\\']).to_string()
-    };
+    let norm = |s: &str| s.replace('/', "\\").to_lowercase().trim_end_matches('\\').to_string();
     norm(a) == norm(&b)
         || matches!(
             (fs::canonicalize(a), fs::canonicalize(b.as_ref())),
@@ -898,12 +891,10 @@ mod tests {
 
     #[test]
     fn path_comparison() {
-        if cfg!(windows) {
-            assert!(same_path(
-                r"C:/Users/X/anvil/bin/anvil.exe",
-                Path::new(r"c:\users\x\anvil\bin\anvil.exe")
-            ));
-        }
+        assert!(same_path(
+            r"C:/Users/X/anvil/bin/anvil.exe",
+            Path::new(r"c:\users\x\anvil\bin\anvil.exe")
+        ));
         assert!(same_path("/a/b/", Path::new("/a/b")));
         assert!(!same_path("/a/b", Path::new("/a/c")));
     }

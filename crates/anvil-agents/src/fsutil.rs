@@ -41,11 +41,6 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> Result<()> {
         .at(dir)?;
     tmp.write_all(contents).at(tmp.path())?;
     tmp.as_file().sync_all().at(tmp.path())?;
-    #[cfg(unix)]
-    if let Ok(meta) = fs::metadata(&target) {
-        // Keep the original mode (tempfile creates 0600).
-        let _ = fs::set_permissions(tmp.path(), meta.permissions());
-    }
     tmp.persist(&target).map_err(|e| e.error).at(&target)?;
     Ok(())
 }
@@ -123,19 +118,5 @@ mod tests {
         fs::write(&path, "\u{feff}{}").unwrap();
         assert_eq!(read_optional(&path).unwrap().as_deref(), Some("{}"));
         assert_eq!(read_optional(&dir.path().join("missing")).unwrap(), None);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn symlinked_config_keeps_the_link() {
-        let dir = tempfile::tempdir().unwrap();
-        let real = dir.path().join("dotfiles/config.toml");
-        fs::create_dir_all(real.parent().unwrap()).unwrap();
-        fs::write(&real, "a = 1\n").unwrap();
-        let link = dir.path().join("config.toml");
-        std::os::unix::fs::symlink(&real, &link).unwrap();
-        write_atomic(&link, b"a = 2\n").unwrap();
-        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
-        assert_eq!(fs::read_to_string(&real).unwrap(), "a = 2\n");
     }
 }

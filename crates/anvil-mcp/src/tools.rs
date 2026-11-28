@@ -100,16 +100,17 @@ impl ToolRegistry {
             }),
             json!({
                 "name": "cc_build",
-                "description": "Build a C/C++ project with CMake+Ninja (generating compile_commands.json for clangd) or compile a single C/C++ file directly with Clang (when `file` is set and `output` is omitted, writes `<stem>[.exe]` alongside the source file).",
+                "description": "Build a C/C++ project with CMake+Ninja (generating compile_commands.json for clangd) or compile a single C/C++ file directly with Clang (when `file` is set and `output` is omitted, writes `<stem>.exe` alongside the source file; C++ executables default to `-static` (standalone `.exe`) unless sanitizers or shared libraries are used).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "workspace": { "type": "string", "description": "Project root directory (defaults to server workspace)." },
                         "file": { "type": "string", "description": "Optional single C/C++ file to compile directly with clang/clang++." },
-                        "output": { "type": "string", "description": "Optional output executable path for single-file compilation (defaults to `<stem>[.exe]` alongside the source file)." },
+                        "output": { "type": "string", "description": "Optional output executable path for single-file compilation (defaults to `<stem>.exe` alongside the source file)." },
                         "build_dir": { "type": "string", "description": "CMake build directory relative to workspace (default 'build')." },
                         "build_type": { "type": "string", "description": "CMAKE_BUILD_TYPE (default 'Debug')." },
                         "target": { "type": "string", "description": "Optional CMake target name." },
+                        "static_link": { "type": "boolean", "description": "Link C/C++ runtime statically (-static) for standalone Windows executables without libc++.dll/libunwind.dll. Default (omitted): on for single-file C++ and for fresh CMake build directories (seeds CMAKE_EXE_LINKER_FLAGS_INIT=-static, never overriding flags already cached); off with sanitizers (-fsanitize=, -D...SANITIZ...=ON) or BUILD_SHARED_LIBS=ON. true forces CMAKE_EXE_LINKER_FLAGS=-static; false disables it." },
                         "extra_args": { "type": "array", "items": { "type": "string" }, "description": "Extra CMake configure or compiler flags (single-file mode adds -Wall -Wextra unless already provided)." },
                         "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default 180)." }
                     }
@@ -308,6 +309,7 @@ impl ToolRegistry {
                 .unwrap_or("Debug")
                 .to_string(),
             target: args.get("target").and_then(Value::as_str).map(str::to_string),
+            static_link: args.get("static_link").and_then(Value::as_bool),
             extra_args: string_vec(args, "extra_args"),
             timeout: Duration::from_secs(timeout_secs),
         };

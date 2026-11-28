@@ -158,34 +158,32 @@ fn remove_tree(root: &Path) -> Vec<PathBuf> {
         }
     }
 
-    if cfg!(windows) {
-        // Renames only work within a volume: keep the trash next to `root`
-        // (falling back to %TEMP%), then delete it once this process has exited.
-        let name = format!(
-            ".{}.anvil-trash-{}",
-            root.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            std::process::id()
-        );
-        let trash = root
-            .parent()
-            .map(|p| p.join(&name))
-            .filter(|t| fs::create_dir_all(t).is_ok())
-            .unwrap_or_else(|| {
-                let t = std::env::temp_dir().join(&name);
-                let _ = fs::create_dir_all(&t);
-                t
-            });
-        for (n, file) in remaining_files(root).into_iter().enumerate() {
-            if fs::remove_file(&file).is_err() {
-                let _ = fs::rename(&file, trash.join(format!("{n}.bin")));
-            }
+    // Renames only work within a volume: keep the trash next to `root`
+    // (falling back to %TEMP%), then delete it once this process has exited.
+    let name = format!(
+        ".{}.anvil-trash-{}",
+        root.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        std::process::id()
+    );
+    let trash = root
+        .parent()
+        .map(|p| p.join(&name))
+        .filter(|t| fs::create_dir_all(t).is_ok())
+        .unwrap_or_else(|| {
+            let t = std::env::temp_dir().join(&name);
+            let _ = fs::create_dir_all(&t);
+            t
+        });
+    for (n, file) in remaining_files(root).into_iter().enumerate() {
+        if fs::remove_file(&file).is_err() {
+            let _ = fs::rename(&file, trash.join(format!("{n}.bin")));
         }
-        let _ = fs::remove_dir_all(root);
-        if fs::remove_dir_all(&trash).is_err() && trash.exists() {
-            schedule_delete_after_exit(&trash);
-        }
+    }
+    let _ = fs::remove_dir_all(root);
+    if fs::remove_dir_all(&trash).is_err() && trash.exists() {
+        schedule_delete_after_exit(&trash);
     }
 
     if root.exists() {
@@ -203,7 +201,6 @@ fn remove_tree(root: &Path) -> Vec<PathBuf> {
 /// Delete `dir` from a detached `cmd.exe` a few seconds after this process
 /// exits (running executables, such as this `anvil.exe`, cannot be deleted
 /// while they run but are free once they have exited).
-#[cfg(windows)]
 fn schedule_delete_after_exit(dir: &Path) {
     use std::os::windows::process::CommandExt;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
@@ -219,9 +216,6 @@ fn schedule_delete_after_exit(dir: &Path) {
         .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
         .spawn();
 }
-
-#[cfg(not(windows))]
-fn schedule_delete_after_exit(_dir: &Path) {}
 
 fn remaining_files(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
@@ -240,7 +234,7 @@ fn remaining_files(root: &Path) -> Vec<PathBuf> {
     out
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

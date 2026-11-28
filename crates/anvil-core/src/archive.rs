@@ -269,12 +269,12 @@ fn unpack_verified(req: &ExtractRequest<'_>, tmp: &Path, progress: &mut dyn Prog
     for link in deferred {
         match link {
             DeferredLink::Symlink { rel, target } => {
-                if cfg!(windows) && !symlink_target_exists(tmp, &rel, &target) {
+                if !symlink_target_exists(tmp, &rel, &target) {
                     pending.push((rel, target));
                     continue;
                 }
                 ensure_no_symlink_ancestors(tmp, &rel).map_err(|r| unsafe_entry(&rel, r))?;
-                create_symlink(tmp, &rel, &target, &mut report.warnings)?;
+                create_symlink(id, tmp, &rel, &target, &mut report.warnings)?;
             }
             DeferredLink::Hard { rel, source } => {
                 ensure_no_symlink_ancestors(tmp, &rel).map_err(|r| unsafe_entry(&rel, r))?;
@@ -304,7 +304,7 @@ fn unpack_verified(req: &ExtractRequest<'_>, tmp: &Path, progress: &mut dyn Prog
         };
         for (rel, target) in batch {
             ensure_no_symlink_ancestors(tmp, &rel).map_err(|r| unsafe_entry(&rel, r))?;
-            create_symlink(tmp, &rel, &target, &mut report.warnings)?;
+            create_symlink(id, tmp, &rel, &target, &mut report.warnings)?;
             report.links += 1;
         }
         pending = rest;
@@ -325,7 +325,7 @@ pub fn sanitize_entry_path(raw: &Path) -> Result<Option<PathBuf>, &'static str> 
     for component in raw.components() {
         match component {
             Component::Normal(part) => {
-                if cfg!(windows) && part.to_string_lossy().contains(':') {
+                if part.to_string_lossy().contains(':') {
                     return Err("':' is not allowed in paths (drive / alternate data stream)");
                 }
                 out.push(part);
@@ -385,54 +385,56 @@ fn ensure_no_symlink_ancestors(root: &Path, rel: &Path) -> Result<(), &'static s
     Ok(())
 }
 
-fn create_symlink(root: &Path, rel: &Path, target: &Path, warnings: &mut Vec<String>) -> Result<()> {
+fn create_symlink(id: &str, root: &Path, rel: &Path, target: &Path, warnings: &mut Vec<String>) -> Result<()> {
     let link = root.join(rel);
     if let Some(dir) = link.parent() {
         fs::create_dir_all(dir).at(dir)?;
     }
     remove_path_if_exists(&link)?;
 
-    #[cfg(unix)]
-    {
-        let _ = warnings;
-        std::os::unix::fs::symlink(target, &link).at(&link)
+    let resolved = link.parent().unwrap_or(root).join(target);
+    let is_dir = resolved.is_dir();
+    let created = if is_dir {
+        std::os::windows::fs::symlink_dir(target, &link)
+    } else {
+        std::os::windows::fs::symlink_file(target, &link)
+    };
+    if created.is_ok() {
+        return Ok(());
     }
-
-    #[cfg(windows)]
-    {
-        let resolved = link.parent().unwrap_or(root).join(target);
-        let is_dir = resolved.is_dir();
-        let created = if is_dir {
-            std::os::windows::fs::symlink_dir(target, &link)
-        } else {
-            std::os::windows::fs::symlink_file(target, &link)
-        };
-        if created.is_ok() {
-            return Ok(());
+    // Creating symlinks needs Developer Mode or admin rights on Windows: copy instead.
+    if is_dir {
+        // A link to one of its own ancestors (`a/b -> ..`) is a loop: copying it
+        // would recurse into the copy until the path is too long.
+        let parent = link.parent().unwrap_or(root);
+        if let (Ok(src), Ok(parent)) = (fs::canonicalize(&resolved), fs::canonicalize(parent)) {
+            if parent.starts_with(&src) {
+                return Err(CoreError::UnsafeEntry {
+                    id: id.to_string(),
+                    entry: rel.display().to_string(),
+                    reason: "symlink to an ancestor directory (loop) cannot be replaced by a copy".into(),
+                });
+            }
         }
-        // Creating symlinks needs Developer Mode or admin rights on Windows: copy instead.
-        if is_dir {
-            copy_dir_recursive(&resolved, &link)?;
-        } else if resolved.is_file() {
-            fs::copy(&resolved, &link).at(&link)?;
-        } else {
-            warnings.push(format!(
-                "skipped dangling symlink '{}' -> '{}'",
-                rel.display(),
-                target.display()
-            ));
-            return Ok(());
-        }
+        copy_dir_recursive(&resolved, &link)?;
+    } else if resolved.is_file() {
+        fs::copy(&resolved, &link).at(&link)?;
+    } else {
         warnings.push(format!(
-            "symlink '{}' -> '{}' replaced by a copy (symlinks unavailable)",
+            "skipped dangling symlink '{}' -> '{}'",
             rel.display(),
             target.display()
         ));
-        Ok(())
+        return Ok(());
     }
+    warnings.push(format!(
+        "symlink '{}' -> '{}' replaced by a copy (symlinks unavailable)",
+        rel.display(),
+        target.display()
+    ));
+    Ok(())
 }
 
-#[cfg(windows)]
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst).at(dst)?;
     for entry in fs::read_dir(src).at(src)? {
@@ -472,7 +474,7 @@ fn rename_with_retry(from: &Path, to: &Path) -> io::Result<()> {
     loop {
         match fs::rename(from, to) {
             Ok(()) => return Ok(()),
-            Err(e) if cfg!(windows) && attempt < 10 && e.kind() == io::ErrorKind::PermissionDenied => {
+            Err(e) if attempt < 10 && e.kind() == io::ErrorKind::PermissionDenied => {
                 attempt += 1;
                 std::thread::sleep(Duration::from_millis(50 * attempt));
             }
@@ -543,31 +545,11 @@ fn append_tree<W: io::Write>(builder: &mut tar::Builder<W>, root: &Path, rel: &P
         if file_type.is_dir() {
             builder.append_dir(&name, &path).at(&path)?;
             append_tree(builder, root, &name)?;
-        } else if cfg!(windows) && file_type.is_file() && looks_like_unix_executable(&path) {
-            let mut file = File::open(&path).at(&path)?;
-            let meta = file.metadata().at(&path)?;
-            let mut header = tar::Header::new_gnu();
-            header.set_metadata_in_mode(&meta, tar::HeaderMode::Deterministic);
-            header.set_mode(0o755);
-            header.set_cksum();
-            builder.append_data(&mut header, &name, &mut file).at(&path)?;
         } else {
             builder.append_path_with_name(&path, &name).at(&path)?;
         }
     }
     Ok(())
-}
-
-/// Detect ELF binaries or `#!` scripts when packing Linux toolchains from a Windows host.
-fn looks_like_unix_executable(path: &Path) -> bool {
-    let Ok(mut f) = File::open(path) else {
-        return false;
-    };
-    let mut magic = [0u8; 4];
-    let Ok(n) = f.read(&mut magic) else {
-        return false;
-    };
-    (n >= 4 && &magic == b"\x7fELF") || (n >= 2 && &magic[..2] == b"#!")
 }
 
 #[cfg(test)]
@@ -584,11 +566,9 @@ mod tests {
         assert!(sanitize_entry_path(Path::new("../evil.txt")).is_err());
         assert!(sanitize_entry_path(Path::new("bin/../../evil.txt")).is_err());
         assert!(sanitize_entry_path(Path::new("/etc/passwd")).is_err());
-        if cfg!(windows) {
-            assert!(sanitize_entry_path(Path::new(r"C:\Windows\evil.dll")).is_err());
-            assert!(sanitize_entry_path(Path::new(r"..\evil.txt")).is_err());
-            assert!(sanitize_entry_path(Path::new("file.txt:stream")).is_err());
-        }
+        assert!(sanitize_entry_path(Path::new(r"C:\Windows\evil.dll")).is_err());
+        assert!(sanitize_entry_path(Path::new(r"..\evil.txt")).is_err());
+        assert!(sanitize_entry_path(Path::new("file.txt:stream")).is_err());
     }
 
     #[test]

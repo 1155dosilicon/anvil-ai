@@ -11,8 +11,8 @@ use crate::state::STATE_FILE;
 pub const ANVIL_HOME_ENV: &str = "ANVIL_HOME";
 
 /// Default install directory:
-/// `ANVIL_HOME` if set, otherwise `%LOCALAPPDATA%\anvil` (Windows) or
-/// `$XDG_DATA_HOME/anvil`, falling back to `~/.local/share/anvil` (Linux).
+/// `ANVIL_HOME` if set, otherwise `%LOCALAPPDATA%\anvil` (falling back to
+/// `%USERPROFILE%\AppData\Local\anvil`).
 pub fn default_install_dir() -> Result<PathBuf> {
     default_install_dir_with(|key| std::env::var_os(key))
 }
@@ -25,27 +25,15 @@ pub fn default_install_dir_with(get: impl Fn(&str) -> Option<OsString>) -> Resul
         return Ok(PathBuf::from(home));
     }
 
-    if cfg!(windows) {
-        if let Some(local) = non_empty("LOCALAPPDATA") {
-            return Ok(PathBuf::from(local).join("anvil"));
-        }
-        if let Some(profile) = non_empty("USERPROFILE") {
-            return Ok(PathBuf::from(profile).join("AppData").join("Local").join("anvil"));
-        }
-        Err(CoreError::Environment(
-            "the install directory (%LOCALAPPDATA% is not set; use --dest or ANVIL_HOME)".into(),
-        ))
-    } else {
-        if let Some(data) = non_empty("XDG_DATA_HOME").filter(|p| Path::new(p).is_absolute()) {
-            return Ok(PathBuf::from(data).join("anvil"));
-        }
-        if let Some(home) = non_empty("HOME") {
-            return Ok(PathBuf::from(home).join(".local").join("share").join("anvil"));
-        }
-        Err(CoreError::Environment(
-            "the install directory ($HOME is not set; use --dest or ANVIL_HOME)".into(),
-        ))
+    if let Some(local) = non_empty("LOCALAPPDATA") {
+        return Ok(PathBuf::from(local).join("anvil"));
     }
+    if let Some(profile) = non_empty("USERPROFILE") {
+        return Ok(PathBuf::from(profile).join("AppData").join("Local").join("anvil"));
+    }
+    Err(CoreError::Environment(
+        "the install directory (%LOCALAPPDATA% is not set; use --dest or ANVIL_HOME)".into(),
+    ))
 }
 
 /// `--dest` if given (made absolute), otherwise [`default_install_dir`].
@@ -59,8 +47,8 @@ pub fn resolve_install_dir(dest: Option<&Path>) -> Result<PathBuf> {
 /// Resolve the directory of an existing Anvil installation:
 /// 1. `--dest` if explicitly provided;
 /// 2. `ANVIL_HOME` if set and non-empty;
-/// 3. `<current_exe>/../..` if it contains `state.json` (running from `<ANVIL_HOME>/bin/anvil`);
-/// 4. the platform default (`%LOCALAPPDATA%\anvil` / `$XDG_DATA_HOME/anvil` / `~/.local/share/anvil`).
+/// 3. `<current_exe>/../..` if it contains `state.json` (running from `<ANVIL_HOME>\bin\anvil.exe`);
+/// 4. the default (`%LOCALAPPDATA%\anvil`).
 pub fn resolve_existing_install_dir(dest: Option<&Path>) -> Result<PathBuf> {
     let exe = std::env::current_exe().ok();
     resolve_existing_install_dir_with(dest, exe.as_deref(), |key| std::env::var_os(key))
@@ -227,40 +215,26 @@ mod tests {
     #[test]
     fn anvil_home_overrides_everything() {
         let dir = default_install_dir_with(env(&[
-            ("ANVIL_HOME", "/opt/anvil-custom"),
-            ("LOCALAPPDATA", "/la"),
-            ("HOME", "/home/u"),
+            ("ANVIL_HOME", r"D:\anvil-custom"),
+            ("LOCALAPPDATA", r"C:\Users\u\AppData\Local"),
         ]))
         .unwrap();
-        assert_eq!(dir, PathBuf::from("/opt/anvil-custom"));
+        assert_eq!(dir, PathBuf::from(r"D:\anvil-custom"));
     }
 
     #[test]
     fn empty_anvil_home_is_ignored() {
-        let dir =
-            default_install_dir_with(env(&[("ANVIL_HOME", ""), ("LOCALAPPDATA", "/la"), ("HOME", "/home/u")])).unwrap();
-        if cfg!(windows) {
-            assert_eq!(dir, PathBuf::from("/la").join("anvil"));
-        } else {
-            assert_eq!(dir, PathBuf::from("/home/u/.local/share/anvil"));
-        }
+        let dir = default_install_dir_with(env(&[("ANVIL_HOME", ""), ("LOCALAPPDATA", r"C:\la")])).unwrap();
+        assert_eq!(dir, PathBuf::from(r"C:\la").join("anvil"));
     }
 
     #[test]
     fn platform_default_dir() {
-        if cfg!(windows) {
-            let dir = default_install_dir_with(env(&[("LOCALAPPDATA", r"C:\Users\u\AppData\Local")])).unwrap();
-            assert_eq!(dir, PathBuf::from(r"C:\Users\u\AppData\Local\anvil"));
-            assert!(default_install_dir_with(env(&[])).is_err());
-        } else {
-            let dir = default_install_dir_with(env(&[("HOME", "/home/u")])).unwrap();
-            assert_eq!(dir, PathBuf::from("/home/u/.local/share/anvil"));
-            let dir = default_install_dir_with(env(&[("HOME", "/home/u"), ("XDG_DATA_HOME", "/data")])).unwrap();
-            assert_eq!(dir, PathBuf::from("/data/anvil"));
-            // Relative XDG_DATA_HOME must be ignored per the XDG spec.
-            let dir = default_install_dir_with(env(&[("HOME", "/home/u"), ("XDG_DATA_HOME", "rel")])).unwrap();
-            assert_eq!(dir, PathBuf::from("/home/u/.local/share/anvil"));
-        }
+        let dir = default_install_dir_with(env(&[("LOCALAPPDATA", r"C:\Users\u\AppData\Local")])).unwrap();
+        assert_eq!(dir, PathBuf::from(r"C:\Users\u\AppData\Local\anvil"));
+        let dir = default_install_dir_with(env(&[("USERPROFILE", r"C:\Users\u")])).unwrap();
+        assert_eq!(dir, PathBuf::from(r"C:\Users\u\AppData\Local\anvil"));
+        assert!(default_install_dir_with(env(&[])).is_err());
     }
 
     #[test]
@@ -316,24 +290,14 @@ mod tests {
         let explicit = tmp.path().join("explicit-dest");
         let env_home = tmp.path().join("env-home");
         let local_app = tmp.path().join("local-app");
-        let unix_home = tmp.path().join("unix-home");
 
-        let default_env = || {
-            env(&[
-                ("LOCALAPPDATA", local_app.to_str().unwrap()),
-                ("HOME", unix_home.to_str().unwrap()),
-            ])
-        };
+        let default_env = || env(&[("LOCALAPPDATA", local_app.to_str().unwrap())]);
 
-        // Without state.json next to exe/../.., fall back to platform default.
+        // Without state.json next to exe/../.., fall back to %LOCALAPPDATA%\anvil.
         let dir = resolve_existing_install_dir_with(None, Some(&exe), default_env()).unwrap();
-        if cfg!(windows) {
-            assert_eq!(dir, absolutize(&local_app.join("anvil")).unwrap());
-        } else {
-            assert_eq!(dir, absolutize(&unix_home.join(".local/share/anvil")).unwrap());
-        }
+        assert_eq!(dir, absolutize(&local_app.join("anvil")).unwrap());
 
-        // Once state.json exists in exe/../.., exe location wins over platform default.
+        // Once state.json exists in exe/../.., exe location wins over default.
         std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
         std::fs::write(installed.join(STATE_FILE), "{}").unwrap();
         let dir = resolve_existing_install_dir_with(None, Some(&exe), default_env()).unwrap();
@@ -343,11 +307,7 @@ mod tests {
         let dir = resolve_existing_install_dir_with(
             None,
             Some(&exe),
-            env(&[
-                ("ANVIL_HOME", ""),
-                ("LOCALAPPDATA", local_app.to_str().unwrap()),
-                ("HOME", unix_home.to_str().unwrap()),
-            ]),
+            env(&[("ANVIL_HOME", ""), ("LOCALAPPDATA", local_app.to_str().unwrap())]),
         )
         .unwrap();
         assert_eq!(dir, absolutize(&installed).unwrap());
@@ -359,7 +319,6 @@ mod tests {
             env(&[
                 ("ANVIL_HOME", env_home.to_str().unwrap()),
                 ("LOCALAPPDATA", local_app.to_str().unwrap()),
-                ("HOME", unix_home.to_str().unwrap()),
             ]),
         )
         .unwrap();
@@ -372,7 +331,6 @@ mod tests {
             env(&[
                 ("ANVIL_HOME", env_home.to_str().unwrap()),
                 ("LOCALAPPDATA", local_app.to_str().unwrap()),
-                ("HOME", unix_home.to_str().unwrap()),
             ]),
         )
         .unwrap();

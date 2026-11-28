@@ -106,7 +106,7 @@ pub struct InstallArgs {
     /// Directory containing manifest.json and bundles/ (default: directory of this executable).
     #[arg(long, value_name = "DIR")]
     pub from: Option<PathBuf>,
-    /// Install directory (default: $ANVIL_HOME, %LOCALAPPDATA%\anvil or ~/.local/share/anvil).
+    /// Install directory (default: $ANVIL_HOME or %LOCALAPPDATA%\anvil).
     #[arg(long, value_name = "DIR")]
     pub dest: Option<PathBuf>,
     /// Comma-separated bundle ids to install (default: all bundles for this platform).
@@ -150,7 +150,7 @@ pub struct EnvArgs {
     /// Install directory.
     #[arg(long, value_name = "DIR")]
     pub dest: Option<PathBuf>,
-    /// Output format (default: powershell on Windows, $SHELL on Unix).
+    /// Output format (default: powershell).
     #[arg(
         long,
         value_name = "SHELL",
@@ -353,9 +353,6 @@ pub struct BundleInitUsbArgs {
     /// Optional path to `anvil.exe` (Windows x86_64) to copy to the USB root.
     #[arg(long, value_name = "FILE")]
     pub win_exe: Option<PathBuf>,
-    /// Optional path to `anvil` (Linux x86_64) to copy to the USB root.
-    #[arg(long, value_name = "FILE")]
-    pub linux_bin: Option<PathBuf>,
     /// Machine-readable output: stdout contains only a JSON document.
     #[arg(long)]
     pub json: bool,
@@ -366,8 +363,8 @@ pub struct BundlePackArgs {
     /// Path to the USB drive or staging directory.
     #[arg(long, value_name = "DIR")]
     pub usb: PathBuf,
-    /// Target platform (`windows-x86_64` or `linux-x86_64`).
-    #[arg(long, value_name = "PLATFORM")]
+    /// Target platform (`windows-x86_64`).
+    #[arg(long, value_name = "PLATFORM", default_value = "windows-x86_64")]
     pub platform: String,
     /// Bundle id (`llvm`, `rust`, `build-tools`).
     #[arg(long, value_name = "ID")]
@@ -394,7 +391,7 @@ pub struct BundleSyncArgs {
     /// Path to the USB drive or staging directory.
     #[arg(long, value_name = "DIR")]
     pub usb: PathBuf,
-    /// Comma-separated target platforms (`windows-x86_64,linux-x86_64`).
+    /// Target platforms (`windows-x86_64`; default: all).
     #[arg(long, value_name = "PLATFORM,...", value_delimiter = ',')]
     pub targets: Vec<String>,
     /// Comma-separated bundle ids to sync (default: all).

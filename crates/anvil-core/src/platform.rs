@@ -10,19 +10,15 @@ use crate::error::CoreError;
 pub enum Platform {
     #[serde(rename = "windows-x86_64")]
     WindowsX86_64,
-    #[serde(rename = "linux-x86_64")]
-    LinuxX86_64,
 }
 
 impl Platform {
-    pub const ALL: [Platform; 2] = [Platform::WindowsX86_64, Platform::LinuxX86_64];
+    pub const ALL: [Platform; 1] = [Platform::WindowsX86_64];
 
     /// Platform of the running process, or `None` if it is not supported.
     pub fn current() -> Option<Platform> {
         if cfg!(all(windows, target_arch = "x86_64")) {
             Some(Platform::WindowsX86_64)
-        } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-            Some(Platform::LinuxX86_64)
         } else {
             None
         }
@@ -38,7 +34,6 @@ impl Platform {
     pub fn as_str(self) -> &'static str {
         match self {
             Platform::WindowsX86_64 => "windows-x86_64",
-            Platform::LinuxX86_64 => "linux-x86_64",
         }
     }
 
@@ -46,7 +41,6 @@ impl Platform {
     pub fn exe_suffix(self) -> &'static str {
         match self {
             Platform::WindowsX86_64 => ".exe",
-            Platform::LinuxX86_64 => "",
         }
     }
 
@@ -84,17 +78,13 @@ mod tests {
             assert_eq!(json, format!("\"{}\"", p.as_str()));
             assert_eq!(serde_json::from_str::<Platform>(&json).unwrap(), p);
         }
+        assert!("linux-x86_64".parse::<Platform>().is_err());
         assert!("macos-aarch64".parse::<Platform>().is_err());
     }
 
     #[test]
     fn current_platform_is_detected_on_supported_hosts() {
-        if cfg!(all(windows, target_arch = "x86_64")) {
-            assert_eq!(Platform::current(), Some(Platform::WindowsX86_64));
-            assert_eq!(Platform::WindowsX86_64.exe_suffix(), std::env::consts::EXE_SUFFIX);
-        } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-            assert_eq!(Platform::current(), Some(Platform::LinuxX86_64));
-            assert_eq!(Platform::LinuxX86_64.exe_suffix(), std::env::consts::EXE_SUFFIX);
-        }
+        assert_eq!(Platform::current(), Some(Platform::WindowsX86_64));
+        assert_eq!(Platform::WindowsX86_64.exe_suffix(), std::env::consts::EXE_SUFFIX);
     }
 }

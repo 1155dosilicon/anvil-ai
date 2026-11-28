@@ -378,4 +378,101 @@ fn cc_build_single_file_outputs_next_to_source_and_deduplicates_default_flags() 
     assert_eq!(cmd3.iter().filter(|&&a| a == "-Wall").count(), 1, "{cmd3:?}");
     assert_eq!(cmd3.iter().filter(|&&a| a == "-Wextra").count(), 1, "{cmd3:?}");
     assert_eq!(cmd3.iter().filter(|&&a| a == "-std=c17").count(), 1, "{cmd3:?}");
+    assert!(!cmd3.contains(&"-static"), "C file should not force -static by default");
+}
+
+#[test]
+fn cc_build_single_cpp_file_defaults_to_static_unless_sanitized_or_disabled() {
+    let tmp = tempfile::tempdir().unwrap();
+    let layout = InstallLayout::new(tmp.path().join("anvil"));
+    let llvm_bin = layout.toolchain_dir("llvm").join("bin");
+    std::fs::create_dir_all(&llvm_bin).unwrap();
+
+    let stub_src = tmp.path().join("stub_clangxx.rs");
+    std::fs::write(&stub_src, "fn main() {}\n").unwrap();
+    let stub_clangxx = llvm_bin.join(format!("clang++{}", std::env::consts::EXE_SUFFIX));
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let mut cmd = std::process::Command::new(rustc);
+    cmd.args(["--edition", "2021", "-C", "debuginfo=0"]);
+    if cfg!(all(windows, target_env = "gnu")) {
+        cmd.args(["-C", "link-self-contained=yes"]);
+    }
+    let status = cmd
+        .arg("-o")
+        .arg(&stub_clangxx)
+        .arg(&stub_src)
+        .status()
+        .expect("failed to compile stub clang++");
+    assert!(status.success());
+
+    let cpp_file = tmp.path().join("hello.cpp");
+    std::fs::write(&cpp_file, "int main() { return 0; }\n").unwrap();
+
+    let registry = ToolRegistry::new(
+        layout,
+        tmp.path().to_path_buf(),
+        EnvMode::Sandbox(tmp.path().join("sandbox")),
+    );
+    let responses = run_session(
+        &registry,
+        &[
+            json!({
+                "jsonrpc":"2.0",
+                "id":1,
+                "method":"tools/call",
+                "params":{"name":"cc_build","arguments":{"file": cpp_file.display().to_string()}}
+            }),
+            json!({
+                "jsonrpc":"2.0",
+                "id":2,
+                "method":"tools/call",
+                "params":{"name":"cc_build","arguments":{"file": cpp_file.display().to_string(), "static_link": false}}
+            }),
+            json!({
+                "jsonrpc":"2.0",
+                "id":3,
+                "method":"tools/call",
+                "params":{"name":"cc_build","arguments":{"file": cpp_file.display().to_string(), "extra_args": ["-fsanitize=address,undefined"]}}
+            }),
+        ],
+    );
+
+    let (p1, err1) = parse_tool_payload(&responses[0]);
+    assert!(!err1, "{p1}");
+    let cmd1: Vec<&str> = p1["command"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(
+        cmd1.contains(&"-static"),
+        "C++ single-file should default to -static: {cmd1:?}"
+    );
+
+    let (p2, err2) = parse_tool_payload(&responses[1]);
+    assert!(!err2, "{p2}");
+    let cmd2: Vec<&str> = p2["command"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(
+        !cmd2.contains(&"-static"),
+        "static_link=false should disable -static: {cmd2:?}"
+    );
+
+    let (p3, err3) = parse_tool_payload(&responses[2]);
+    assert!(!err3, "{p3}");
+    let cmd3: Vec<&str> = p3["command"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(
+        !cmd3.contains(&"-static"),
+        "sanitizers must not inject -static: {cmd3:?}"
+    );
 }

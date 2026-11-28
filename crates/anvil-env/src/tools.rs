@@ -21,15 +21,21 @@ const fn tool(name: &'static str, toolchain: &'static str) -> ManagedTool {
 }
 
 pub const MANAGED_TOOLS: &[ManagedTool] = &[
-    // LLVM / Clang
+    // LLVM / Clang (llvm-mingw)
     tool("clang", "llvm"),
     tool("clang++", "llvm"),
     tool("clangd", "llvm"),
     tool("clang-tidy", "llvm"),
     tool("clang-format", "llvm"),
-    tool("lld", "llvm"),
     tool("ld.lld", "llvm"),
     tool("lldb", "llvm"),
+    tool("llvm-ar", "llvm"),
+    tool("llvm-ranlib", "llvm"),
+    tool("llvm-windres", "llvm"),
+    tool("windres", "llvm"),
+    tool("llvm-objdump", "llvm"),
+    tool("llvm-nm", "llvm"),
+    tool("llvm-strip", "llvm"),
     // Rust
     tool("rustc", "rust"),
     tool("cargo", "rust"),
@@ -37,23 +43,21 @@ pub const MANAGED_TOOLS: &[ManagedTool] = &[
     tool("clippy-driver", "rust"),
     tool("cargo-clippy", "rust"),
     tool("rust-analyzer", "rust"),
+    tool("rustdoc", "rust"),
     // Build tools
     tool("cmake", "build-tools"),
+    tool("ctest", "build-tools"),
     tool("ninja", "build-tools"),
-    tool("pkg-config", "build-tools"),
-    tool("pkgconf", "build-tools"),
-    tool("gdb", "build-tools"),
 ];
+
+/// Shims created by earlier Anvil versions for tools that are no longer managed
+/// (`lld` dispatcher, and the Linux-only `pkg-config`/`pkgconf`/`gdb`). They are
+/// removed from `bin` on install/uninstall so an upgrade leaves no dead shims.
+pub const RETIRED_TOOLS: &[&str] = &["lld", "pkg-config", "pkgconf", "gdb"];
 
 /// Look up a managed tool by exact name (case-insensitive on Windows).
 pub fn managed_tool(name: &str) -> Option<&'static ManagedTool> {
-    MANAGED_TOOLS.iter().find(|t| {
-        if cfg!(windows) {
-            t.name.eq_ignore_ascii_case(name)
-        } else {
-            t.name == name
-        }
-    })
+    MANAGED_TOOLS.iter().find(|t| t.name.eq_ignore_ascii_case(name))
 }
 
 /// Strip a trailing `.exe` (any case) from a file name.
@@ -125,14 +129,14 @@ mod tests {
     fn argv0_resolution() {
         assert_eq!(name("cmake"), Some("cmake"));
         assert_eq!(name("cmake.exe"), Some("cmake"));
-        assert_eq!(name("CMAKE.EXE").is_some(), cfg!(windows));
-        assert_eq!(name("/home/u/.local/share/anvil/bin/clang++"), Some("clang++"));
+        assert_eq!(name("CMAKE.EXE"), Some("cmake"));
+        assert_eq!(name("ctest.exe"), Some("ctest"));
+        assert_eq!(name("llvm-windres.exe"), Some("llvm-windres"));
         assert_eq!(name(r"C:\Users\u\AppData\Local\anvil\bin\ld.lld.exe"), Some("ld.lld"));
         assert_eq!(name("ld.lld"), Some("ld.lld"));
         assert_eq!(name("cargo-clippy"), Some("cargo-clippy"));
         assert_eq!(name("anvil"), None);
         assert_eq!(name("anvil.exe"), None);
-        assert_eq!(name("/usr/bin/anvil"), None);
         assert_eq!(name("gcc"), None);
         assert_eq!(name(""), None);
     }

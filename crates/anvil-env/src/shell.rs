@@ -10,27 +10,14 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shell {
     PowerShell,
-    Bash,
-    Zsh,
-    Fish,
     Json,
 }
 
 impl Shell {
-    pub const NAMES: [&'static str; 5] = ["powershell", "bash", "zsh", "fish", "json"];
+    pub const NAMES: [&'static str; 2] = ["powershell", "json"];
 
-    /// PowerShell on Windows; on Unix the shell named by `$SHELL` (default bash).
     pub fn detect() -> Shell {
-        if cfg!(windows) {
-            return Shell::PowerShell;
-        }
-        let shell = std::env::var("SHELL").unwrap_or_default();
-        match shell.rsplit('/').next().unwrap_or("") {
-            "zsh" => Shell::Zsh,
-            "fish" => Shell::Fish,
-            "pwsh" => Shell::PowerShell,
-            _ => Shell::Bash,
-        }
+        Shell::PowerShell
     }
 }
 
@@ -40,9 +27,6 @@ impl FromStr for Shell {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_ascii_lowercase().as_str() {
             "powershell" | "pwsh" | "ps" => Ok(Shell::PowerShell),
-            "bash" | "sh" => Ok(Shell::Bash),
-            "zsh" => Ok(Shell::Zsh),
-            "fish" => Ok(Shell::Fish),
             "json" => Ok(Shell::Json),
             other => Err(format!(
                 "unknown shell '{other}' (expected one of: {})",
@@ -93,7 +77,7 @@ impl SessionEnv {
             "install_dir": self.install_dir,
             "installed": self.install_dir.join(anvil_core::STATE_FILE).is_file(),
             "path_prepend": self.path_prepend,
-            "path_separator": if cfg!(windows) { ";" } else { ":" },
+            "path_separator": ";",
             "vars": vars,
         })
     }
@@ -119,28 +103,6 @@ impl SessionEnv {
                     );
                 }
             }
-            Shell::Bash | Shell::Zsh => {
-                for (k, v) in &self.vars {
-                    let _ = writeln!(out, "export {k}={}", crate::profile::sh_quote(v));
-                }
-                for dir in self.path_prepend.iter().rev() {
-                    let d = crate::profile::sh_quote(&dir.display().to_string());
-                    let _ = writeln!(
-                        out,
-                        "case \":${{PATH}}:\" in *:{d}:*) ;; *) export PATH={d}\":${{PATH}}\" ;; esac"
-                    );
-                }
-            }
-            Shell::Fish => {
-                let fish = |s: &str| format!("'{}'", s.replace('\\', r"\\").replace('\'', r"\'"));
-                for (k, v) in &self.vars {
-                    let _ = writeln!(out, "set -gx {k} {}", fish(v));
-                }
-                for dir in self.path_prepend.iter().rev() {
-                    let d = fish(&dir.display().to_string());
-                    let _ = writeln!(out, "contains -- {d} $PATH; or set -gx PATH {d} $PATH");
-                }
-            }
         }
         out
     }
@@ -151,7 +113,7 @@ mod tests {
     use super::*;
 
     fn env() -> SessionEnv {
-        SessionEnv::for_layout(&InstallLayout::new(PathBuf::from("/opt/it's anvil")))
+        SessionEnv::for_layout(&InstallLayout::new(PathBuf::from(r"C:\it's anvil")))
     }
 
     #[test]
@@ -161,25 +123,19 @@ mod tests {
         }
         assert_eq!("PWSH".parse::<Shell>().unwrap(), Shell::PowerShell);
         assert!("cmd".parse::<Shell>().is_err());
+        assert!("bash".parse::<Shell>().is_err());
     }
 
     #[test]
-    fn renders_every_shell() {
+    fn renders_powershell_and_json() {
         let e = env();
         let ps = e.render(Shell::PowerShell);
-        assert!(ps.contains("$env:ANVIL_HOME = '/opt/it''s anvil'"), "{ps}");
+        assert!(ps.contains(r"$env:ANVIL_HOME = 'C:\it''s anvil'"), "{ps}");
         assert!(ps.contains("$env:CMAKE_GENERATOR = 'Ninja'"));
-
-        let sh = e.render(Shell::Bash);
-        assert!(sh.contains(r"export ANVIL_HOME='/opt/it'\''s anvil'"), "{sh}");
-        assert!(sh.contains("export PATH="));
-        assert_eq!(sh, e.render(Shell::Zsh));
-
-        let fish = e.render(Shell::Fish);
-        assert!(fish.contains(r"set -gx ANVIL_HOME '/opt/it\'s anvil'"), "{fish}");
 
         let json: serde_json::Value = serde_json::from_str(&e.render(Shell::Json)).unwrap();
         assert_eq!(json["vars"]["CMAKE_GENERATOR"], "Ninja");
+        assert_eq!(json["path_separator"], ";");
         assert_eq!(json["path_prepend"].as_array().unwrap().len(), 1);
         assert!(json["vars"].get("CC").is_none(), "no clang shim installed");
     }

@@ -1,9 +1,5 @@
 //! Stream-repack upstream `.tar.xz`, `.tar.gz`, and `.zip` archives directly
 //! into `.tar.zst` without extracting onto the host filesystem.
-//!
-//! This preserves 100% of Unix symlinks, hard links, and executable modes
-//! (`0o755`) even when building Linux x86_64 bundles on a Windows host without
-//! Developer Mode or administrator privileges.
 
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -68,10 +64,7 @@ fn repack_into(
 
     let mut seen_paths: HashSet<String> = HashSet::new();
     let mut found_tools: HashSet<String> = HashSet::new();
-    let exe_suffix = match platform {
-        Platform::WindowsX86_64 => ".exe",
-        Platform::LinuxX86_64 => "",
-    };
+    let exe_suffix = platform.exe_suffix();
 
     for (archive_path, layout) in inputs {
         let name_lower = archive_path
@@ -83,7 +76,6 @@ fn repack_into(
             append_zip(
                 archive_path,
                 *layout,
-                platform,
                 &mut builder,
                 &mut seen_paths,
                 &mut found_tools,
@@ -257,7 +249,6 @@ fn append_tar<R: Read, W: io::Write>(
 fn append_zip<W: io::Write>(
     src_path: &Path,
     layout: UpstreamLayout,
-    platform: Platform,
     builder: &mut tar::Builder<W>,
     seen: &mut HashSet<String>,
     found_tools: &mut HashSet<String>,
@@ -300,17 +291,11 @@ fn append_zip<W: io::Write>(
         }
         record_tool(&mapped, exe_suffix, found_tools);
 
-        let default_mode =
-            if platform == Platform::LinuxX86_64 && (layout == UpstreamLayout::IntoBin || mapped.starts_with("bin")) {
-                0o755
-            } else {
-                0o644
-            };
         let mode = entry
             .unix_mode()
             .map(|m| m & 0o777)
             .filter(|&m| m != 0)
-            .unwrap_or(default_mode);
+            .unwrap_or(0o644);
 
         let mut header = tar::Header::new_gnu();
         header.set_entry_type(tar::EntryType::Regular);
@@ -354,7 +339,7 @@ pub fn map_entry_path(raw: &Path, layout: UpstreamLayout) -> Option<PathBuf> {
         UpstreamLayout::RustComponent => {
             // Official Rust tarballs have layout:
             // `<pkg>-<ver>-<triple>/<component-dir>/{bin,lib,share,etc}/...`
-            // Plus top-level metadata files (`install.sh`, `components`, `rust-installer-version`)
+            // Plus top-level metadata files (`install.sh` of the Rust installer, `components`, `rust-installer-version`)
             // and per-component `manifest.in` that we skip.
             if parts.len() <= 2 {
                 return None;
@@ -405,26 +390,26 @@ mod tests {
             Some(PathBuf::from("bin/clang.exe"))
         );
         assert_eq!(
-            map_entry_path(Path::new("ninja"), UpstreamLayout::IntoBin),
-            Some(PathBuf::from("bin/ninja"))
+            map_entry_path(Path::new("ninja.exe"), UpstreamLayout::IntoBin),
+            Some(PathBuf::from("bin/ninja.exe"))
         );
         assert_eq!(
             map_entry_path(
-                Path::new("rustc-1.85.1-x86_64-unknown-linux-gnu/rustc/bin/rustc"),
+                Path::new("rustc-1.85.1-x86_64-pc-windows-gnu/rustc/bin/rustc.exe"),
                 UpstreamLayout::RustComponent
             ),
-            Some(PathBuf::from("bin/rustc"))
+            Some(PathBuf::from("bin/rustc.exe"))
         );
         assert_eq!(
             map_entry_path(
-                Path::new("rustc-1.85.1-x86_64-unknown-linux-gnu/rustc/manifest.in"),
+                Path::new("rustc-1.85.1-x86_64-pc-windows-gnu/rustc/manifest.in"),
                 UpstreamLayout::RustComponent
             ),
             None
         );
         assert_eq!(
             map_entry_path(
-                Path::new("rustc-1.85.1-x86_64-unknown-linux-gnu/install.sh"),
+                Path::new("rustc-1.85.1-x86_64-pc-windows-gnu/install.sh"),
                 UpstreamLayout::RustComponent
             ),
             None

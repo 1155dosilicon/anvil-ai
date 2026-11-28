@@ -1,12 +1,12 @@
 ---
 name: rust-systems
-title: Rust Systems Programming
-description: Idiomatic Rust with Cargo, clippy, rustfmt and rust-analyzer - project setup, error handling, tests and Windows/Linux portability using the offline Anvil toolchain.
+title: Rust Systems Programming on Windows
+description: Idiomatic Rust on Windows x86_64 with Cargo, clippy, rustfmt and rust-analyzer - project setup, error handling, tests, C interop and standalone Windows builds using the offline Anvil toolchain.
 ---
 
 ## Workflow (run in this order, fix every failure before moving on)
 
-```sh
+```powershell
 cargo new --lib mycrate          # or: cargo new myapp
 cargo build                      # debug build
 cargo fmt --all                  # format (use `cargo fmt --all --check` in CI)
@@ -72,20 +72,33 @@ mod tests {
 }
 ```
 
-Use `tempfile::tempdir()` for filesystem tests; never write to the real home
-directory. Run one test: `cargo test parses_valid_input -- --nocapture`.
+Use `tempfile::tempdir()` for filesystem tests; never write to the real user
+profile or Windows Registry. Run one test:
+`cargo test parses_valid_input -- --nocapture`.
 
-## Windows / Linux portability
+## Windows x86_64 targets and linking in Anvil
 
-- Build paths with `Path::join`, never with `"/"` or `"\\"` string concatenation.
-- Executables: `format!("tool{}", std::env::consts::EXE_SUFFIX)`.
-- Platform code: `#[cfg(windows)]` / `#[cfg(unix)]`; keep both branches compiling.
-- Text files may have `\r\n`: use `str::lines()`, which handles both.
-- On Windows Anvil links with llvm-mingw + lld (targets
-  `x86_64-pc-windows-gnullvm` / `-gnu`), not Visual Studio's `link.exe`.
-  The linker is pre-configured by the shims; do not install MSVC.
+- **Default target: `x86_64-pc-windows-gnu` (self-contained):**
+  - Anvil ships Rust's `x86_64-pc-windows-gnu` toolchain with `rust-mingw`
+    self-contained libraries and configures `-C link-self-contained=yes`
+    automatically via the shims — no Visual Studio / MSVC needed.
+  - Resulting `.exe` binaries depend only on standard Windows system DLLs
+    (`KERNEL32.dll`, `msvcrt.dll`, `ntdll.dll`, etc.) and run standalone on any
+    Windows 10/11 PC.
+  - C build scripts (`build.rs` / `cc` crate) compile with `CC=clang.exe` and
+    `llvm-ar` from Anvil's `llvm-mingw` and link cleanly with the default target.
+- **Optional target: `x86_64-pc-windows-gnullvm`:**
+  - `rust-std` for `x86_64-pc-windows-gnullvm` is also bundled and pre-wired to
+    link with `llvm-mingw`'s `clang.exe` / `ld.lld`
+    (`cargo build --target x86_64-pc-windows-gnullvm`).
+  - Anvil sets `CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_RUSTFLAGS=-C target-feature=+crt-static`
+    (unless you already set it), so `gnullvm` binaries link `libunwind` statically
+    and run standalone too. If you override `RUSTFLAGS`, keep `+crt-static` or the
+    `.exe` will need `libunwind.dll` from `toolchains\llvm\bin`.
+- Build paths with `Path::join`, never string concatenation; handle `\r\n` with
+  `str::lines()`.
 
 ## Debugging
 
-`cargo build` then `lldb target/debug/myapp` (`b main`, `r`, `bt`, `p var`).
-Set `RUST_BACKTRACE=1` to get a backtrace on panic.
+`cargo build` then `lldb target\debug\myapp.exe` (`b main`, `r`, `bt`, `p var`).
+Set `$env:RUST_BACKTRACE = "1"` to get a backtrace on panic.

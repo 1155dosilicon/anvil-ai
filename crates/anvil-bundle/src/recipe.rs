@@ -65,47 +65,39 @@ impl RecipeBook {
         Ok(book)
     }
 
-    /// Built-in default upstream recipe for Windows x86_64 and Linux x86_64.
+    /// Built-in default upstream recipe for Windows x86_64.
     pub fn builtin() -> Self {
         let rust_ver = "1.85.1";
         let llvm_mingw_tag = "20250305";
-        let llvm_ver = "20.1.0";
         let cmake_ver = "3.31.6";
         let ninja_ver = "1.12.1";
 
         let rust_dist = "https://static.rust-lang.org/dist";
         let rust_win_triple = "x86_64-pc-windows-gnu";
-        let rust_linux_triple = "x86_64-unknown-linux-gnu";
 
-        let rust_artifacts = |triple: &str, include_win_extras: bool| -> Vec<UpstreamArtifact> {
-            let mut comps = vec![
-                format!("rustc-{rust_ver}-{triple}.tar.xz"),
-                format!("cargo-{rust_ver}-{triple}.tar.xz"),
-                format!("rust-std-{rust_ver}-{triple}.tar.xz"),
-                format!("clippy-{rust_ver}-{triple}.tar.xz"),
-                format!("rustfmt-{rust_ver}-{triple}.tar.xz"),
-                format!("rust-analyzer-{rust_ver}-{triple}.tar.xz"),
-                format!("rust-src-{rust_ver}.tar.xz"),
-            ];
-            if include_win_extras {
-                comps.push(format!("rust-mingw-{rust_ver}-{triple}.tar.xz"));
-                comps.push(format!("rust-std-{rust_ver}-x86_64-pc-windows-gnullvm.tar.xz"));
-            }
-            comps
-                .into_iter()
-                .map(|filename| UpstreamArtifact {
-                    url: format!("{rust_dist}/{filename}"),
-                    filename,
-                    layout: UpstreamLayout::RustComponent,
-                    sha256: None,
-                })
-                .collect()
-        };
+        let rust_artifacts: Vec<UpstreamArtifact> = [
+            format!("rustc-{rust_ver}-{rust_win_triple}.tar.xz"),
+            format!("cargo-{rust_ver}-{rust_win_triple}.tar.xz"),
+            format!("rust-std-{rust_ver}-{rust_win_triple}.tar.xz"),
+            format!("clippy-{rust_ver}-{rust_win_triple}.tar.xz"),
+            format!("rustfmt-{rust_ver}-{rust_win_triple}.tar.xz"),
+            format!("rust-analyzer-{rust_ver}-{rust_win_triple}.tar.xz"),
+            format!("rust-src-{rust_ver}.tar.xz"),
+            format!("rust-mingw-{rust_ver}-{rust_win_triple}.tar.xz"),
+            format!("rust-std-{rust_ver}-x86_64-pc-windows-gnullvm.tar.xz"),
+        ]
+        .into_iter()
+        .map(|filename| UpstreamArtifact {
+            url: format!("{rust_dist}/{filename}"),
+            filename,
+            layout: UpstreamLayout::RustComponent,
+            sha256: None,
+        })
+        .collect();
 
         Self {
             schema_version: 1,
             bundles: vec![
-                // ---- Windows x86_64 ----
                 BundleRecipe {
                     id: "llvm".into(),
                     platform: Platform::WindowsX86_64,
@@ -127,7 +119,7 @@ impl RecipeBook {
                     version: rust_ver.into(),
                     target_subdir: "toolchains/rust".into(),
                     archive_name: "rust.tar.zst".into(),
-                    artifacts: rust_artifacts(rust_win_triple, true),
+                    artifacts: rust_artifacts,
                 },
                 BundleRecipe {
                     id: "build-tools".into(),
@@ -154,55 +146,6 @@ impl RecipeBook {
                         },
                     ],
                 },
-                // ---- Linux x86_64 ----
-                BundleRecipe {
-                    id: "llvm".into(),
-                    platform: Platform::LinuxX86_64,
-                    version: llvm_ver.into(),
-                    target_subdir: "toolchains/llvm".into(),
-                    archive_name: "llvm-clang.tar.zst".into(),
-                    artifacts: vec![UpstreamArtifact {
-                        url: format!(
-                            "https://github.com/llvm/llvm-project/releases/download/llvmorg-{llvm_ver}/LLVM-{llvm_ver}-Linux-X64.tar.xz"
-                        ),
-                        filename: format!("LLVM-{llvm_ver}-Linux-X64.tar.xz"),
-                        layout: UpstreamLayout::StripTopDir,
-                        sha256: None,
-                    }],
-                },
-                BundleRecipe {
-                    id: "rust".into(),
-                    platform: Platform::LinuxX86_64,
-                    version: rust_ver.into(),
-                    target_subdir: "toolchains/rust".into(),
-                    archive_name: "rust.tar.zst".into(),
-                    artifacts: rust_artifacts(rust_linux_triple, false),
-                },
-                BundleRecipe {
-                    id: "build-tools".into(),
-                    platform: Platform::LinuxX86_64,
-                    version: format!("cmake-{cmake_ver}-ninja-{ninja_ver}"),
-                    target_subdir: "toolchains/build-tools".into(),
-                    archive_name: "build-tools.tar.zst".into(),
-                    artifacts: vec![
-                        UpstreamArtifact {
-                            url: format!(
-                                "https://github.com/Kitware/CMake/releases/download/v{cmake_ver}/cmake-{cmake_ver}-linux-x86_64.tar.gz"
-                            ),
-                            filename: format!("cmake-{cmake_ver}-linux-x86_64.tar.gz"),
-                            layout: UpstreamLayout::StripTopDir,
-                            sha256: None,
-                        },
-                        UpstreamArtifact {
-                            url: format!(
-                                "https://github.com/ninja-build/ninja/releases/download/v{ninja_ver}/ninja-linux.zip"
-                            ),
-                            filename: format!("ninja-{ninja_ver}-linux.zip"),
-                            layout: UpstreamLayout::IntoBin,
-                            sha256: None,
-                        },
-                    ],
-                },
             ],
         }
     }
@@ -221,12 +164,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_recipe_covers_both_platforms_and_all_bundles() {
+    fn builtin_recipe_covers_windows_bundles() {
         let book = RecipeBook::builtin();
         assert_eq!(book.schema_version, 1);
         assert_eq!(book.select(&[Platform::WindowsX86_64], &[]).len(), 3);
-        assert_eq!(book.select(&[Platform::LinuxX86_64], &[]).len(), 3);
-        assert_eq!(book.select(&[], &["rust".into()]).len(), 2);
+        assert_eq!(book.select(&[], &["rust".into()]).len(), 1);
         // Round-trip JSON serialization.
         let json = serde_json::to_string_pretty(&book).unwrap();
         let parsed: RecipeBook = serde_json::from_str(&json).unwrap();
