@@ -18,7 +18,8 @@ Run `<install_dir>\bin\anvil.exe doctor --smoke-test --json`, where
 
     & "$env:LOCALAPPDATA\anvil\bin\anvil.exe" doctor --smoke-test --json
 
-Success = `"ok": true` and every `smoke_tests[].status` is `"ok"`.
+Success = `"ok": true` and no `smoke_tests[].status` is `"failed"`
+(`"skipped"` only means that toolchain was not installed, e.g. with `--only`).
 Otherwise report `errors[]` to the user.
 
 ## Step 3 - use
@@ -38,4 +39,5 @@ Otherwise report `errors[]` to the user.
 
 - Always pass `--json` and `--yes`; never wait for interactive prompts.
 - Never edit files under `ANVIL_HOME` by hand.
-- Re-running step 1 is safe (idempotent).
+- Re-running step 1 is safe (idempotent); it is also how an existing install
+  is updated to the `anvil.exe` on this drive.

@@ -73,7 +73,7 @@ impl ToolRegistry {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "smoke_test": { "type": "boolean", "description": "Compile and execute hello-world smoke tests in C, C++ and Rust (default false)." }
+                        "smoke_test": { "type": "boolean", "description": "Compile hello-world smoke tests in C, C++ (-static), Rust and Rust gnullvm and run them with a clean system PATH to catch missing DLLs (default false)." }
                     }
                 }
             }),

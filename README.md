@@ -91,7 +91,7 @@ templates/          # AGENTS.md, START_HERE.md, install.ps1 para a raiz do USB
 | :--- | :--- | :--- | :--- |
 | **SiliconFlower** (GUI + CLI) | `%USERPROFILE%\.siliconflower\config.json` (ou `$SILICONFLOWER_DATA_DIR\config.json`) | Flat `.md` em `%USERPROFILE%\.siliconflower\skills\<nome>.md` | Preserva `apiKey`, `baseURL`, `hooks` e outros MCPs; caminho absoluto garante funcionamento no app Electron. |
 | **Claude Code / Desktop** | `%USERPROFILE%\.claude.json` + `%APPDATA%\Claude\claude_desktop_config.json` | Pasta em `%USERPROFILE%\.claude\skills\<nome>\SKILL.md` | Desktop só é tocado se já existir (ou com `--all`). |
-| **Codex** (CLI + GUI) | `%USERPROFILE%\.codex\config.toml` (`[mcp_servers.anvil]`) | Pasta em `%USERPROFILE%\.codex\skills\<nome>\SKILL.md` (+ `%USERPROFILE%\.agents\skills\` se existir) | Edição via `toml_edit` preservando comentários e formatação. |
+| **Codex** (CLI + GUI) | `%USERPROFILE%\.codex\config.toml` (ou `$CODEX_HOME\config.toml`; `[mcp_servers.anvil]`) | Pasta em `%USERPROFILE%\.codex\skills\<nome>\SKILL.md` (+ `%USERPROFILE%\.agents\skills\` se existir) | Edição via `toml_edit` preservando comentários e formatação. |
 | **Antigravity** (CLI + GUI) | `%USERPROFILE%\.gemini\antigravity\mcp_config.json` | Pasta em `%USERPROFILE%\.gemini\antigravity\skills\<nome>\SKILL.md` (+ `%USERPROFILE%\.gemini\config\skills\`) | Compatível com descoberta nativa de skills. |
 | **Qualquer outro cliente / modelo aberto** | `anvil agents print-config --format json\|toml` | `anvil skills list/read` ou tools MCP `skill_list`/`skill_read` | Basta ler `AGENTS.md` na raiz do USB. |
 
@@ -105,9 +105,9 @@ Todos os números de linha e coluna são **1-based** (como em compiladores e edi
 
 | Tool | Descrição |
 | :--- | :--- |
-| `anvil_doctor` | Verifica toolchains, versões, agentes e (opcional) compila/executa smoke-tests em C, C++ standalone e Rust sob `PATH` limpo. |
+| `anvil_doctor` | Verifica toolchains, versões, agentes e (opcional) compila/executa smoke-tests em C, C++ standalone, Rust e Rust `gnullvm` sob `PATH` limpo. |
 | `rust_cargo` | Roda `check`, `build`, `test`, `clippy`, `fmt_check` ou `fmt` com diagnósticos JSON estruturados (`file`, `line`, `col`, `code`, `message`). |
-| `cc_build` | Configura e compila C/C++ com CMake + Ninja (gerando `compile_commands.json` para o `clangd`) ou compila arquivo único direto com Clang (C++ usa `-static` por padrão sem sanitizers; configurável via `static_link`). |
+| `cc_build` | Configura e compila C/C++ com CMake + Ninja (gerando `compile_commands.json` para o `clangd`) ou compila arquivo único direto com Clang. C++ sai standalone por padrão: `-static` no arquivo único e `CMAKE_EXE_LINKER_FLAGS_INIT=-static` em diretórios de build CMake novos (sem sobrescrever flags já em cache), exceto com sanitizers ou `BUILD_SHARED_LIBS=ON`; `static_link: true\|false` força ou desliga. |
 | `cc_lint_format` | Roda `clang-format` ou `clang-tidy` em modo `check` ou `fix`. |
 | `lsp_diagnostics` | Diagnósticos em tempo real via `rust-analyzer` ou `clangd`. |
 | `lsp_hover` | Tipo, assinatura e documentação em `(file, line, col)`. |
@@ -155,18 +155,32 @@ cargo build --release --bin anvil
 Ou dê clique direito em `install.ps1` → **Executar com PowerShell**.
 Qualquer agente de IA que abrir a pasta do pendrive e ler [AGENTS.md](templates/AGENTS.md) executa exatamente esse fluxo sozinho.
 
+### 3. Atualizar uma versão existente
+
+```powershell
+# Pendrive: baixe anvil-windows-x86_64.exe do release mais novo e atualize a raiz
+# (também limpa restos de Linux de pendrives montados com o Anvil 0.1)
+.\anvil-windows-x86_64.exe bundle init-usb --usb E:\anvil --win-exe .\anvil-windows-x86_64.exe
+E:\anvil\anvil.exe bundle verify --usb E:\anvil
+
+# PC: reinstale a partir do pendrive (toolchains de mesma versão são mantidos)
+E:\anvil\anvil.exe install --from E:\anvil --yes
+```
+
+Depois reinicie os agentes de IA abertos para carregarem o novo servidor `anvil mcp`. As mudanças de cada versão estão no [CHANGELOG](CHANGELOG.md).
+
 ---
 
 ## 💻 Referência da CLI
 
 ```text
 anvil install         Instala bundles .tar.zst em streaming, cria shims, configura PATH e agentes
-anvil doctor          Verifica instalação, versões, agentes e (--smoke-test) compila/roda C, C++ e Rust
+anvil doctor          Verifica instalação, versões, agentes e (--smoke-test) compila/roda C, C++, Rust e Rust gnullvm
 anvil env             Imprime comandos PowerShell (ou JSON) para a sessão atual
 anvil agents          detect | setup | remove | print-config
 anvil skills          list | read <nome> | sync
 anvil mcp             Sobe o servidor MCP unificado sobre stdio (toolchains + ponte LSP + skills)
-anvil bundle          init-usb | pack | sync | verify | print-recipe
+anvil bundle          init-usb | pack | sync | verify | print-recipe (init-usb também remove restos de Linux da 0.1)
 anvil uninstall       Remove instalação, shims, PATH e entradas do Anvil nos agentes
 ```
 
@@ -184,7 +198,7 @@ cargo build --release --bin anvil
 ```
 
 Os testes nunca alteram o Registry do Windows nem o `%USERPROFILE%` real — toda a suíte roda isolada via `ANVIL_ENV_SANDBOX`.
-O workflow [.github/workflows/ci.yml](.github/workflows/ci.yml) compila, testa e publica `anvil-windows-x86_64.exe` a cada push/PR/tag.
+O workflow [.github/workflows/ci.yml](.github/workflows/ci.yml) compila, testa e anexa `anvil-windows-x86_64.exe` como artefato a cada push/PR. Uma tag `v*` igual à versão do `Cargo.toml` publica o [release](https://github.com/1155dosilicon/anvil-ai/releases) com o binário e o `SHA256SUMS`.
 
 ---
 
