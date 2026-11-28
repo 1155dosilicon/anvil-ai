@@ -20,7 +20,8 @@ clang++ -std=c++23 -static -O2 -DNDEBUG main.cpp -o main.exe
 
 - The MCP tool `cc_build` passes `-static` **automatically** for single-file
   C++ builds unless `-fsanitize=`, `-shared`, `-c` or `static_link: false` is
-  specified.
+  specified, and seeds fresh CMake build directories with
+  `CMAKE_EXE_LINKER_FLAGS_INIT=-static` (see the `cmake-ninja-debug` skill).
 - **Exception — sanitizers & DLLs:** do **not** pass `-static` with
   `-fsanitize=address` (ASan requires `libclang_rt.asan_dynamic-x86_64.dll`) or
   when building shared libraries (`-shared`):

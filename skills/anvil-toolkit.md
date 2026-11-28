@@ -17,8 +17,10 @@ anvil doctor --smoke-test --json
 ```
 
 - `ok: true` -> ready. `tools[]` lists every shim with its version;
-  `smoke_tests[]` compiles C, C++ (`-static`) and Rust and runs each `.exe`
-  with a clean Windows system `PATH` to catch missing-DLL regressions.
+  `smoke_tests[]` compiles C, C++ (`-static`), Rust and Rust `gnullvm` and runs
+  each `.exe` with a clean Windows system `PATH` to catch missing-DLL
+  regressions. `"skipped"` only means that toolchain is not installed
+  (e.g. after `install --only`); `"failed"` is a real problem.
 - `ok: false` -> read `errors[]` and fix them; the most common fix is step 2.
 - Command not found -> run `.\anvil.exe` from the USB drive root or use the
   absolute path `%LOCALAPPDATA%\anvil\bin\anvil.exe` (or `$env:ANVIL_HOME\bin\anvil.exe`).
@@ -69,6 +71,11 @@ toolchain (`rust_cargo`, `cc_build`, `cc_lint_format`) and an LSP bridge
 (`clangd` / `rust-analyzer`) for diagnostics, hover, definition, references and
 symbols. Call `tools/list` to discover exact tool names and schemas.
 
+`cc_build` produces standalone `.exe` files by default: C++ is linked with
+`-static` (single files, and fresh CMake build directories via
+`CMAKE_EXE_LINKER_FLAGS_INIT`), except with sanitizers or shared libraries.
+Pass `static_link: true|false` to force or disable it.
+
 ## Rules
 
 - Never call `rustup`, `winget`, `choco` or Visual Studio to get a compiler:
@@ -76,5 +83,8 @@ symbols. Call `tools/list` to discover exact tool names and schemas.
   `ctest`, `ninja`, `lldb`, `llvm-ar`, `llvm-windres`, `windres`, etc.
 - Shims set `CC=clang.exe`, `CXX=clang++.exe`, `CMAKE_GENERATOR=Ninja`,
   `CARGO_HOME`, `RUSTC`, `RUST_SRC_PATH` and Cargo linker/self-contained flags
-  automatically.
+  automatically (including `+crt-static` for the `x86_64-pc-windows-gnullvm`
+  target, so its binaries need no `libunwind.dll`).
+- Updating: re-run `install.ps1` / `anvil.exe install --yes` from a drive with
+  the newer `anvil.exe`; installed toolchains with the same version are kept.
 - Uninstall: `anvil uninstall --yes --json` (add `--keep-agents` to keep agent configs).

@@ -14,7 +14,7 @@ pub fn run(args: &DoctorArgs) -> Result<Outcome> {
     opts.smoke_test = args.smoke_test;
     opts.env_mode = EnvMode::from_process_env();
     if args.smoke_test && !args.json {
-        eprintln!("running smoke tests (C, C++, Rust)...");
+        eprintln!("running smoke tests (C, C++, Rust, Rust gnullvm)...");
     }
     let report = run_doctor(&opts);
     Ok(Outcome {
@@ -64,7 +64,7 @@ fn render(r: &DoctorReport) -> String {
         for t in &r.smoke_tests {
             let _ = writeln!(
                 s,
-                "  {:<6} {:<8} {}",
+                "  {:<12} {:<8} {}",
                 t.language,
                 mark(t.status),
                 t.detail.as_deref().unwrap_or("")

@@ -16,6 +16,11 @@ no internet connection are needed.
 Installed to `%LOCALAPPDATA%\anvil` (`bin\` is added to your user `Path` in
 `HKCU\Environment`).
 
+To update an existing install, run `install.ps1` again from a drive with the
+newer `anvil.exe`: toolchains that did not change are skipped, shims and agent
+configuration are refreshed. Restart open AI agents afterwards so they load
+the new `anvil mcp` server.
+
 ## AI agents
 
 The installer detects Claude Code / Claude Desktop, Codex, Antigravity and

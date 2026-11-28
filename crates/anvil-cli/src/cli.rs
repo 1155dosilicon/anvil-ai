@@ -137,7 +137,7 @@ pub struct DoctorArgs {
     /// Install directory to check.
     #[arg(long, value_name = "DIR")]
     pub dest: Option<PathBuf>,
-    /// Also compile and run hello-world programs in C, C++ and Rust.
+    /// Also compile hello-world programs in C, C++ (-static), Rust and Rust gnullvm and run them with a clean system PATH.
     #[arg(long)]
     pub smoke_test: bool,
     /// Machine-readable output: stdout contains only a JSON document.
